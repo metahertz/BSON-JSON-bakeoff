@@ -249,8 +249,30 @@ class ResourceMonitor:
         finally:
             self.save_results()
 
-    def save_results(self):
-        """Save collected metrics to JSON file."""
+    def get_summary(self):
+        """
+        Get summary statistics without saving to file.
+        
+        Returns:
+            Dictionary with summary statistics
+        """
+        summary = self._calculate_summary()
+        if summary:
+            # Add sample count
+            summary['samples'] = len(self.metrics)
+        return summary
+    
+    def save_results(self, save_file=True):
+        """
+        Save collected metrics to JSON file and return summary.
+        
+        Args:
+            save_file: If True, save to file. If False, only return summary.
+        
+        Returns:
+            Dictionary with summary statistics
+        """
+        summary = self._calculate_summary()
         output_data = {
             'monitoring_config': {
                 'interval_seconds': self.interval,
@@ -259,21 +281,31 @@ class ResourceMonitor:
                 'samples_collected': len(self.metrics)
             },
             'metrics': self.metrics,
-            'summary': self._calculate_summary()
+            'summary': summary
         }
 
-        with open(self.output_file, 'w') as f:
-            json.dump(output_data, f, indent=2)
+        if save_file:
+            with open(self.output_file, 'w') as f:
+                json.dump(output_data, f, indent=2)
 
-        print(f"\n{'='*80}")
-        print(f"Monitoring stopped. {len(self.metrics)} samples collected.")
-        print(f"Results saved to: {self.output_file}")
-        print(f"{'='*80}")
+            print(f"\n{'='*80}")
+            print(f"Monitoring stopped. {len(self.metrics)} samples collected.")
+            print(f"Results saved to: {self.output_file}")
+            print(f"{'='*80}")
+        
+        return summary
 
     def _calculate_summary(self):
         """Calculate summary statistics from collected metrics."""
         if not self.metrics:
-            return {}
+            return {
+                'avg_cpu_percent': 0.0,
+                'max_cpu_percent': 0.0,
+                'avg_iowait_percent': 0.0,
+                'avg_disk_iops': 0.0,
+                'max_disk_iops': 0.0,
+                'samples': 0
+            }
 
         cpu_totals = [m['cpu']['total'] for m in self.metrics]
         cpu_iowaits = [m['cpu']['iowait'] for m in self.metrics]
@@ -284,20 +316,24 @@ class ResourceMonitor:
             total_iops = sum(d.get('total_iops', 0) for d in m['disk'].values())
             disk_iops.append(total_iops)
 
+        # Return in format expected by results storage (matches schema from plan)
         return {
-            'cpu': {
-                'avg': round(sum(cpu_totals) / len(cpu_totals), 2),
-                'max': round(max(cpu_totals), 2),
-                'min': round(min(cpu_totals), 2),
-                'avg_iowait': round(sum(cpu_iowaits) / len(cpu_iowaits), 2),
-                'max_iowait': round(max(cpu_iowaits), 2)
-            },
-            'disk': {
-                'avg_iops': round(sum(disk_iops) / len(disk_iops), 2),
-                'max_iops': round(max(disk_iops), 2),
-                'min_iops': round(min(disk_iops), 2)
-            }
+            'avg_cpu_percent': round(sum(cpu_totals) / len(cpu_totals), 2) if cpu_totals else 0.0,
+            'max_cpu_percent': round(max(cpu_totals), 2) if cpu_totals else 0.0,
+            'avg_iowait_percent': round(sum(cpu_iowaits) / len(cpu_iowaits), 2) if cpu_iowaits else 0.0,
+            'avg_disk_iops': round(sum(disk_iops) / len(disk_iops), 2) if disk_iops else 0.0,
+            'max_disk_iops': round(max(disk_iops), 2) if disk_iops else 0.0,
+            'samples': len(self.metrics)
         }
+    
+    def get_summary_dict(self):
+        """
+        Get summary statistics as a dictionary matching the results storage schema.
+        
+        Returns:
+            Dictionary with resource metrics summary
+        """
+        return self._calculate_summary()
 
 def main():
     """Main entry point."""
