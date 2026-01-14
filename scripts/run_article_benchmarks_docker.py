@@ -551,7 +551,7 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
                 response["query_error"] = "Could not parse query results"
         
         # Store result in MongoDB if storage is available
-        if results_storage and results_storage.collection and response.get('success'):
+        if results_storage and results_storage.collection is not None and response.get('success'):
             try:
                 # Determine client library based on db_type
                 client_library = None

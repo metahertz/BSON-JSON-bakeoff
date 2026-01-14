@@ -2,14 +2,12 @@
 
 # Full benchmark automation script with progress monitoring (Docker version)
 # This script runs article benchmarks with query tests using Docker containers
-# for MongoDB and DocumentDB, monitors progress, generates HTML report,
-# and updates summary markdown files
+# for MongoDB and DocumentDB, monitors progress, and updates summary markdown files
 
 set -e
 
 BENCHMARK_LOG="benchmark_run_docker.log"
 RESULTS_FILE="article_benchmark_results.json"
-HTML_REPORT="benchmark_report.html"
 TIMEOUT_SECONDS=7200  # 120 minutes
 PROGRESS_INTERVAL=180  # 3 minutes
 
@@ -30,7 +28,7 @@ rm -f "$BENCHMARK_LOG"
 echo "Starting benchmarks in background..."
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-timeout $TIMEOUT_SECONDS python3 "$SCRIPT_DIR/run_article_benchmarks_docker.py" --flame-graph --queries > "$BENCHMARK_LOG" 2>&1 &
+timeout $TIMEOUT_SECONDS python3 "$SCRIPT_DIR/run_article_benchmarks_docker.py" --queries --monitor > "$BENCHMARK_LOG" 2>&1 &
 BENCHMARK_PID=$!
 echo "Benchmark started with PID: $BENCHMARK_PID"
 echo "Log file: $BENCHMARK_LOG"
@@ -98,25 +96,6 @@ echo "✓ Results file created: $RESULTS_FILE"
 FILE_SIZE=$(du -h "$RESULTS_FILE" | cut -f1)
 echo "  Size: $FILE_SIZE"
 
-# Generate HTML report
-echo ""
-echo "=========================================================================="
-echo "GENERATING HTML REPORT"
-echo "=========================================================================="
-# Get the project root (parent of scripts directory)
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$PROJECT_ROOT"
-python3 report/generate_unified_report.py
-
-if [ -f "$HTML_REPORT" ]; then
-    echo "✓ HTML report generated: $HTML_REPORT"
-    HTML_SIZE=$(du -h "$HTML_REPORT" | cut -f1)
-    echo "  Size: $HTML_SIZE"
-else
-    echo "✗ Error: HTML report not generated"
-    exit 1
-fi
-
 echo ""
 echo "=========================================================================="
 echo "BENCHMARK SUITE COMPLETE"
@@ -125,10 +104,9 @@ echo ""
 echo "Output files:"
 echo "  - $BENCHMARK_LOG (execution log)"
 echo "  - $RESULTS_FILE (JSON results)"
-echo "  - $HTML_REPORT (interactive report)"
 echo ""
 echo "Next steps:"
-echo "  1. Review the HTML report: open $HTML_REPORT"
+echo "  1. Review the results in $RESULTS_FILE"
 echo "  2. Update summary markdown files with findings"
 echo ""
 echo "Completion time: $(date)"

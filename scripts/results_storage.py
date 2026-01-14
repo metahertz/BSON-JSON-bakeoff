@@ -82,7 +82,7 @@ class ResultsStorage:
         Returns:
             Inserted document _id as string, or None if failed
         """
-        if not self.collection:
+        if self.collection is None:
             logger.error("Not connected to MongoDB. Call connect() first.")
             return None
         
@@ -115,7 +115,7 @@ class ResultsStorage:
         Returns:
             List of result documents
         """
-        if not self.collection:
+        if self.collection is None:
             logger.error("Not connected to MongoDB. Call connect() first.")
             return []
         
@@ -151,7 +151,7 @@ class ResultsStorage:
         Returns:
             Result document or None if not found
         """
-        if not self.collection:
+        if self.collection is None:
             logger.error("Not connected to MongoDB. Call connect() first.")
             return None
         
@@ -172,7 +172,7 @@ class ResultsStorage:
         Returns:
             Dictionary with 'database_versions' and 'client_versions' lists
         """
-        if not self.collection:
+        if self.collection is None:
             logger.error("Not connected to MongoDB. Call connect() first.")
             return {"database_versions": [], "client_versions": []}
         
