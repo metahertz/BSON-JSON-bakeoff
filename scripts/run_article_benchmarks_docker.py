@@ -204,6 +204,59 @@ def stop_monitoring(monitor_proc):
     except Exception as e:
         print(f"Warning: Error stopping monitor: {e}")
 
+def generate_resource_metrics_filename(db_type, test_type, size, attrs):
+    """Generate a unique filename for resource metrics per test.
+    
+    Args:
+        db_type: Database type (e.g., 'mongodb', 'documentdb')
+        test_type: Test type (e.g., 'single_attr', 'multi_attr')
+        size: Payload size in bytes
+        attrs: Number of attributes
+    
+    Returns:
+        Unique filename string
+    """
+    timestamp = int(time.time())
+    test_type_short = 'single' if test_type == 'single_attr' or attrs == 1 else 'multi'
+    filename = f"resource_metrics_{db_type}_{test_type_short}_{size}B_{timestamp}.json"
+    return filename
+
+def get_resource_summary_from_file(filepath):
+    """Extract resource summary from monitoring output file.
+    
+    Args:
+        filepath: Path to the resource metrics JSON file
+    
+    Returns:
+        Dictionary with resource summary, or None if file doesn't exist or is invalid
+    """
+    if not filepath or not os.path.exists(filepath):
+        return None
+    
+    try:
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+            return data.get('summary', {})
+    except Exception as e:
+        print(f"    ⚠️  Warning: Could not read resource summary from {filepath}: {e}")
+        return None
+
+def print_resource_summary(resource_summary, test_desc=None):
+    """Print resource monitoring summary to debug console.
+    
+    Args:
+        resource_summary: Dictionary with resource metrics summary
+        test_desc: Optional test description for context
+    """
+    if not resource_summary:
+        return
+    
+    print(f"    📊 Resource Monitoring Summary" + (f" ({test_desc})" if test_desc else ""))
+    print(f"      CPU: avg={resource_summary.get('avg_cpu_percent', 0):.1f}%, max={resource_summary.get('max_cpu_percent', 0):.1f}%")
+    print(f"      I/O Wait: avg={resource_summary.get('avg_iowait_percent', 0):.1f}%")
+    print(f"      Disk IOPS: avg={resource_summary.get('avg_disk_iops', 0):.0f}, max={resource_summary.get('max_disk_iops', 0):.0f}")
+    print(f"      Samples: {resource_summary.get('samples', 0)}")
+
 def stop_all_databases():
     """Stop all Docker containers before starting."""
     print("Stopping all Docker containers...")
@@ -490,8 +543,9 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
                 response["query_time_ms"] = None
                 response["query_error"] = "Could not parse query results"
         
-        # Store result in MongoDB if storage is available
-        if results_storage and results_storage.collection is not None and response.get('success'):
+        # Build full result document structure for MongoDB storage (to be stored later)
+        # Include all metadata needed for storage
+        if response.get('success'):
             try:
                 # Determine client library based on db_type
                 client_library = None
@@ -521,7 +575,7 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
                     db_image_tag = database_info.get('tag')
                     db_image_id = database_info.get('image_id')
                 
-                # Build result document matching schema
+                # Build result document matching schema (will be stored to MongoDB later)
                 result_doc = {
                     'timestamp': datetime.now().isoformat(),
                     'test_run_id': test_run_id or 'unknown',
@@ -564,11 +618,10 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
                 if java_version and result_doc.get('system_info'):
                     result_doc['system_info']['java_version'] = java_version
                 
-                stored_id = results_storage.store_test_result(result_doc)
-                if stored_id:
-                    print(f"    ✓ Result stored in MongoDB")
+                # Attach the full document structure to response for later storage
+                response['mongodb_document'] = result_doc
             except Exception as e:
-                print(f"    ⚠️  Warning: Could not store result in MongoDB: {e}")
+                print(f"    ⚠️  Warning: Could not build MongoDB document structure: {e}")
 
         return response
 
@@ -579,7 +632,7 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
         print(f"    ERROR: {str(e)}")
         return {"success": False, "error": str(e)}
 
-def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_test=False, measure_sizes=False, track_activity=False, activity_log=None, config=None, results_storage=None, test_run_id=None, system_info=None, ci_info=None, resource_summary=None):
+def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_test=False, measure_sizes=False, track_activity=False, activity_log=None, config=None, results_storage=None, test_run_id=None, system_info=None, ci_info=None, enable_monitoring=False, monitor_interval=5):
     """Run a complete test suite (single or multi attribute).
 
     Args:
@@ -591,6 +644,8 @@ def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_te
         measure_sizes: Whether to enable BSON/OSON object size measurement
         track_activity: If True, record database start/stop timestamps
         activity_log: List to append activity events to (format: {db_name, event, timestamp})
+        enable_monitoring: If True, start/stop resource monitoring for each test
+        monitor_interval: Resource monitoring interval in seconds
     """
     print(f"\n{'='*80}")
     print(f"{test_type.upper()} ATTRIBUTE TESTS" + (" WITH QUERIES" if enable_queries else ""))
@@ -628,6 +683,16 @@ def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_te
                 if version_info:
                     database_info.update(version_info)
 
+                # Start resource monitoring for this test if enabled
+                monitor_proc = None
+                resource_metrics_file = None
+                if enable_monitoring:
+                    test_type_short = 'single_attr' if test['attrs'] == 1 else 'multi_attr'
+                    resource_metrics_file = generate_resource_metrics_filename(
+                        db['db_type'], test_type_short, test['size'], test['attrs']
+                    )
+                    monitor_proc = start_monitoring(resource_metrics_file, monitor_interval)
+
                 # Run the test
                 print(f"  Testing: {test['desc']}...", end=" ", flush=True)
 
@@ -642,13 +707,25 @@ def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_te
                     measure_sizes=measure_sizes,
                     db_name=db['name'],
                     db_type=db['db_type'],
-                    results_storage=results_storage,
+                    results_storage=None,  # Don't store during run, collect for later
                     test_run_id=test_run_id,
                     database_info=database_info,
                     system_info=system_info,
                     ci_info=ci_info,
-                    resource_summary=resource_summary
+                    resource_summary=None  # Will be populated after monitoring stops
                 )
+
+                # Stop resource monitoring and extract summary
+                resource_summary = None
+                if enable_monitoring and monitor_proc:
+                    stop_monitoring(monitor_proc)
+                    resource_summary = get_resource_summary_from_file(resource_metrics_file)
+                    # Output resource summary to debug console
+                    if resource_summary:
+                        print_resource_summary(resource_summary, test['desc'])
+                    # Update the MongoDB document with resource summary if it exists
+                    if result.get('mongodb_document') and resource_summary:
+                        result['mongodb_document']['resource_metrics'] = resource_summary
 
                 if result['success']:
                     output = f"✓ {result['time_ms']}ms ({result['throughput']:,.0f} docs/sec)"
@@ -721,6 +798,16 @@ def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_te
             results[db['key']] = []
 
             for test in test_configs:
+                # Start resource monitoring for this test if enabled
+                monitor_proc = None
+                resource_metrics_file = None
+                if enable_monitoring:
+                    test_type_short = 'single_attr' if test['attrs'] == 1 else 'multi_attr'
+                    resource_metrics_file = generate_resource_metrics_filename(
+                        db['db_type'], test_type_short, test['size'], test['attrs']
+                    )
+                    monitor_proc = start_monitoring(resource_metrics_file, monitor_interval)
+
                 print(f"  Testing: {test['desc']}...", end=" ", flush=True)
 
                 result = run_benchmark(
@@ -734,13 +821,25 @@ def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_te
                     measure_sizes=measure_sizes,
                     db_name=db['name'],
                     db_type=db['db_type'],
-                    results_storage=results_storage,
+                    results_storage=None,  # Don't store during run, collect for later
                     test_run_id=test_run_id,
                     database_info=database_info,
                     system_info=system_info,
                     ci_info=ci_info,
-                    resource_summary=resource_summary
+                    resource_summary=None  # Will be populated after monitoring stops
                 )
+
+                # Stop resource monitoring and extract summary
+                resource_summary = None
+                if enable_monitoring and monitor_proc:
+                    stop_monitoring(monitor_proc)
+                    resource_summary = get_resource_summary_from_file(resource_metrics_file)
+                    # Output resource summary to debug console
+                    if resource_summary:
+                        print_resource_summary(resource_summary, test['desc'])
+                    # Update the MongoDB document with resource summary if it exists
+                    if result.get('mongodb_document') and resource_summary:
+                        result['mongodb_document']['resource_metrics'] = resource_summary
 
                 if result['success']:
                     output = f"✓ {result['time_ms']}ms ({result['throughput']:,.0f} docs/sec)"
@@ -772,6 +871,32 @@ def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_te
                 })
 
     return results
+
+def store_results_to_mongodb(results_dict, results_storage):
+    """Store all collected test results to MongoDB.
+    
+    Args:
+        results_dict: Dictionary with database keys and lists of result dictionaries
+        results_storage: ResultsStorage instance (or None if not available)
+    
+    Returns:
+        Number of results successfully stored
+    """
+    if not results_storage or results_storage.collection is None:
+        return 0
+    
+    stored_count = 0
+    for db_key, result_list in results_dict.items():
+        for result in result_list:
+            if result.get('success') and result.get('mongodb_document'):
+                try:
+                    stored_id = results_storage.store_test_result(result['mongodb_document'])
+                    if stored_id:
+                        stored_count += 1
+                except Exception as e:
+                    print(f"    ⚠️  Warning: Could not store result to MongoDB: {e}")
+    
+    return stored_count
 
 def generate_summary_table(single_results, multi_results):
     """Generate a summary comparison table."""
@@ -823,6 +948,49 @@ def run_full_comparison_suite(args):
 
     # Load benchmark configuration
     config = load_benchmark_config()
+    
+    # Initialize MongoDB results storage
+    results_storage = None
+    test_run_id = None
+    system_info = None
+    ci_info = None
+    
+    if RESULTS_STORAGE_AVAILABLE:
+        try:
+            # Get MongoDB connection string from config
+            mongodb_conn = config.get('results_storage', 'mongodb_connection_string', fallback=None)
+            db_name = config.get('results_storage', 'database_name', fallback='benchmark_results')
+            coll_name = config.get('results_storage', 'collection_name', fallback='test_runs')
+            
+            if mongodb_conn:
+                results_storage = connect_to_mongodb(mongodb_conn, db_name, coll_name)
+                if results_storage:
+                    print(f"✓ Connected to MongoDB results storage")
+                else:
+                    print(f"⚠️  Warning: Could not connect to MongoDB, results will not be stored")
+            else:
+                print(f"⚠️  Warning: MongoDB connection string not configured, results will not be stored")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not initialize MongoDB storage: {e}")
+        
+        # Generate test run ID
+        if uuid:
+            test_run_id = str(uuid.uuid4())
+            print(f"Test Run ID: {test_run_id}")
+        
+        # Collect system info once at start
+        try:
+            system_info = get_system_info()
+        except Exception as e:
+            print(f"⚠️  Warning: Could not collect system info: {e}")
+        
+        # Collect CI info
+        try:
+            ci_info = get_ci_info()
+            if ci_info.get('ci_run'):
+                print(f"✓ CI environment detected: {ci_info.get('ci_platform')}")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not collect CI info: {e}")
 
     # Add large item tests if requested
     if args.large_items:
@@ -854,14 +1022,6 @@ def run_full_comparison_suite(args):
     # Stop all databases first
     stop_all_databases()
 
-    # Start resource monitoring if requested
-    monitor_proc = None
-    resource_metrics_file = None
-    if args.monitor:
-        resource_metrics_file = "resource_metrics_full.json"
-        monitor_proc = start_monitoring(resource_metrics_file, args.monitor_interval)
-        print()
-
     # ========== PART 1: NO-INDEX TESTS ==========
     print(f"\n{'='*80}")
     print("PART 1: INSERT-ONLY TESTS (NO INDEXES)")
@@ -872,8 +1032,12 @@ def run_full_comparison_suite(args):
         db['flags'] = db['flags'].replace(' -i', '').replace('-i ', '').replace(' -mv', '').replace('-mv ', '')
 
     # Run tests without indexes - restart database before each test for maximum isolation
-    single_results_noindex = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (NO INDEX)", enable_queries=False, restart_per_test=True, measure_sizes=args.measure_sizes, config=config)
-    multi_results_noindex = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (NO INDEX)", enable_queries=False, restart_per_test=True, measure_sizes=args.measure_sizes, config=config)
+    single_results_noindex = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (NO INDEX)", enable_queries=False, restart_per_test=True, measure_sizes=args.measure_sizes, config=config,
+                                           results_storage=results_storage, test_run_id=test_run_id, system_info=system_info, ci_info=ci_info,
+                                           enable_monitoring=args.monitor, monitor_interval=args.monitor_interval)
+    multi_results_noindex = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (NO INDEX)", enable_queries=False, restart_per_test=True, measure_sizes=args.measure_sizes, config=config,
+                                          results_storage=results_storage, test_run_id=test_run_id, system_info=system_info, ci_info=ci_info,
+                                          enable_monitoring=args.monitor, monitor_interval=args.monitor_interval)
 
     # ========== PART 2: WITH-INDEX TESTS ==========
     print(f"\n{'='*80}")
@@ -888,12 +1052,12 @@ def run_full_comparison_suite(args):
     print()
 
     # Run tests with indexes and queries - restart database before each test for maximum isolation
-    single_results_indexed = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (WITH INDEX)", enable_queries=True, restart_per_test=True, measure_sizes=args.measure_sizes, config=config)
-    multi_results_indexed = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (WITH INDEX)", enable_queries=True, restart_per_test=True, measure_sizes=args.measure_sizes, config=config)
-
-    # Stop resource monitoring if running
-    if monitor_proc is not None:
-        stop_monitoring(monitor_proc)
+    single_results_indexed = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (WITH INDEX)", enable_queries=True, restart_per_test=True, measure_sizes=args.measure_sizes, config=config,
+                                           results_storage=results_storage, test_run_id=test_run_id, system_info=system_info, ci_info=ci_info,
+                                           enable_monitoring=args.monitor, monitor_interval=args.monitor_interval)
+    multi_results_indexed = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (WITH INDEX)", enable_queries=True, restart_per_test=True, measure_sizes=args.measure_sizes, config=config,
+                                          results_storage=results_storage, test_run_id=test_run_id, system_info=system_info, ci_info=ci_info,
+                                          enable_monitoring=args.monitor, monitor_interval=args.monitor_interval)
 
     # ========== GENERATE COMPARISON SUMMARY ==========
     print(f"\n{'='*80}")
@@ -903,7 +1067,23 @@ def run_full_comparison_suite(args):
     generate_comparison_summary(single_results_noindex, single_results_indexed,
                                multi_results_noindex, multi_results_indexed)
 
-    # Save comprehensive results
+    # Store all results to MongoDB at the end
+    if results_storage:
+        print(f"\n{'='*80}")
+        print("STORING RESULTS TO MONGODB")
+        print(f"{'='*80}")
+        stored_count = 0
+        stored_count += store_results_to_mongodb(single_results_noindex, results_storage)
+        stored_count += store_results_to_mongodb(multi_results_noindex, results_storage)
+        stored_count += store_results_to_mongodb(single_results_indexed, results_storage)
+        stored_count += store_results_to_mongodb(multi_results_indexed, results_storage)
+        print(f"✓ Stored {stored_count} test results to MongoDB")
+    
+    # Close MongoDB connection
+    if results_storage:
+        results_storage.close()
+
+    # Save comprehensive results to JSON (local backup)
     output_data = {
         "timestamp": datetime.now().isoformat(),
         "configuration": {
@@ -923,23 +1103,13 @@ def run_full_comparison_suite(args):
         }
     }
 
-    # Merge resource monitoring data if available
-    if args.monitor and resource_metrics_file and os.path.exists(resource_metrics_file):
-        try:
-            with open(resource_metrics_file, 'r') as f:
-                resource_data = json.load(f)
-            output_data['resource_monitoring'] = resource_data
-            print(f"\n✓ Resource monitoring data merged into results")
-        except Exception as e:
-            print(f"\nWarning: Could not merge resource monitoring data: {e}")
-
     with open("full_comparison_results.json", "w") as f:
         json.dump(output_data, f, indent=2)
 
     print(f"\n{'='*80}")
     print(f"✓ Full comparison results saved to: full_comparison_results.json")
-    if args.monitor and resource_metrics_file:
-        print(f"✓ Resource metrics saved to: {resource_metrics_file}")
+    if args.monitor:
+        print(f"✓ Resource monitoring enabled (per-test metrics stored with each result)")
     print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*80}\n")
 
@@ -985,8 +1155,8 @@ def main():
                         help=f'Number of array elements for query tests (default: {QUERY_LINKS})')
     parser.add_argument('--measure-sizes', action='store_true',
                         help='Enable BSON/OSON object size measurement and comparison')
-    parser.add_argument('--monitor', action='store_true',
-                        help='Enable system resource monitoring (CPU, disk, network) every 5 seconds')
+    parser.add_argument('--no-monitor', dest='monitor', action='store_false', default=True,
+                        help='Disable system resource monitoring (monitoring is enabled by default)')
     parser.add_argument('--monitor-interval', type=int, default=5,
                         help='Resource monitoring interval in seconds (default: 5)')
     parser.add_argument('--large-items', action='store_true',
@@ -1095,53 +1265,40 @@ def main():
     # Stop all databases first to ensure clean start
     stop_all_databases()
 
-    # Start resource monitoring if requested
-    monitor_proc = None
-    resource_metrics_file = None
-    if args.monitor:
-        resource_metrics_file = "resource_metrics.json"
-        monitor_proc = start_monitoring(resource_metrics_file, args.monitor_interval)
-        print()
-
     # Track database activity for visualization
     activity_log = []
-
-    # Get resource summary (will be updated after monitoring stops)
-    resource_summary = None
     
     try:
-        # Run single-attribute tests
+        # Run single-attribute tests (with per-test monitoring if enabled)
         single_results = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE", enable_queries=enable_queries,
                                        measure_sizes=args.measure_sizes, track_activity=True,
                                        activity_log=activity_log, config=config,
                                        results_storage=results_storage, test_run_id=test_run_id,
-                                       system_info=system_info, ci_info=ci_info, resource_summary=resource_summary)
+                                       system_info=system_info, ci_info=ci_info,
+                                       enable_monitoring=args.monitor, monitor_interval=args.monitor_interval)
 
-        # Run multi-attribute tests
+        # Run multi-attribute tests (with per-test monitoring if enabled)
         multi_results = run_test_suite(MULTI_ATTR_TESTS, "MULTI", enable_queries=enable_queries,
                                       measure_sizes=args.measure_sizes, track_activity=True,
                                       activity_log=activity_log, config=config,
                                       results_storage=results_storage, test_run_id=test_run_id,
-                                      system_info=system_info, ci_info=ci_info, resource_summary=resource_summary)
+                                      system_info=system_info, ci_info=ci_info,
+                                      enable_monitoring=args.monitor, monitor_interval=args.monitor_interval)
 
         # Generate summary
         generate_summary_table(single_results, multi_results)
 
-    finally:
-        # Stop resource monitoring if running and get summary
-        if monitor_proc is not None:
-            stop_monitoring(monitor_proc)
-            # Try to get resource summary from monitor
-            try:
-                from monitor_resources import ResourceMonitor
-                # The monitor saves to file, read it
-                if resource_metrics_file and os.path.exists(resource_metrics_file):
-                    with open(resource_metrics_file, 'r') as f:
-                        resource_data = json.load(f)
-                        resource_summary = resource_data.get('summary', {})
-            except Exception as e:
-                print(f"⚠️  Warning: Could not get resource summary: {e}")
+        # Store all results to MongoDB at the end
+        if results_storage:
+            print(f"\n{'='*80}")
+            print("STORING RESULTS TO MONGODB")
+            print(f"{'='*80}")
+            stored_count = 0
+            stored_count += store_results_to_mongodb(single_results, results_storage)
+            stored_count += store_results_to_mongodb(multi_results, results_storage)
+            print(f"✓ Stored {stored_count} test results to MongoDB")
         
+    finally:
         # Close MongoDB connection
         if results_storage:
             results_storage.close()
@@ -1162,16 +1319,6 @@ def main():
         "database_activity": activity_log
     }
 
-    # Merge resource monitoring data if available
-    if args.monitor and resource_metrics_file and os.path.exists(resource_metrics_file):
-        try:
-            with open(resource_metrics_file, 'r') as f:
-                resource_data = json.load(f)
-            output_data['resource_monitoring'] = resource_data
-            print(f"\n✓ Resource monitoring data merged into results")
-        except Exception as e:
-            print(f"\nWarning: Could not merge resource monitoring data: {e}")
-
     # Save results to JSON (optional, for debugging)
     # Results are now primarily stored in MongoDB
     output_file = "article_benchmark_results.json"
@@ -1183,11 +1330,8 @@ def main():
     except Exception as e:
         print(f"\n⚠️  Warning: Could not save local JSON file: {e}")
     
-    if args.monitor and resource_metrics_file:
-        print(f"✓ Resource metrics saved to: {resource_metrics_file}")
-    
-    if results_storage:
-        print(f"✓ Results stored in MongoDB")
+    if args.monitor:
+        print(f"✓ Resource monitoring enabled (per-test metrics stored with each result)")
     
     print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*80}\n")

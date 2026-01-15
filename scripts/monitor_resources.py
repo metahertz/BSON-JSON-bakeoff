@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 System resource monitoring script for benchmark instrumentation.
-Collects CPU, disk, and network utilization every 5 seconds.
+Collects CPU, disk, and network utilization every 1 seconds.
 """
 
 import time
@@ -340,8 +340,8 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description='Monitor system resources during benchmarks')
-    parser.add_argument('--interval', '-i', type=int, default=5,
-                        help='Sampling interval in seconds (default: 5)')
+    parser.add_argument('--interval', '-i', type=int, default=1,
+                        help='Sampling interval in seconds (default: 1)')
     parser.add_argument('--output', '-o', type=str, default='resource_metrics.json',
                         help='Output JSON file (default: resource_metrics.json)')
     args = parser.parse_args()
