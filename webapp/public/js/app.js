@@ -45,19 +45,55 @@ async function loadVersions() {
 async function loadResults() {
     try {
         const filters = getFilters();
-        const queryParams = new URLSearchParams();
+        let allResults = [];
         
-        if (filters.database_type) queryParams.append('database_type', filters.database_type);
-        if (filters.database_version) queryParams.append('database_version', filters.database_version);
-        if (filters.start_date) queryParams.append('start_date', filters.start_date);
-        if (filters.end_date) queryParams.append('end_date', filters.end_date);
-        queryParams.append('limit', '100');
+        // If no database type filter is applied, fetch results from all database types
+        if (!filters.database_type) {
+            // Get all available database types
+            const versionsResponse = await fetch(`${API_BASE}/meta/versions`);
+            const versionsData = await versionsResponse.json();
+            const databaseTypes = versionsData.database_types || [];
+            console.log('Found database types:', databaseTypes);
+            
+            // Fetch results for each database type
+            const fetchPromises = databaseTypes.map(async (dbType) => {
+                const queryParams = new URLSearchParams();
+                queryParams.append('database_type', dbType);
+                if (filters.database_version) queryParams.append('database_version', filters.database_version);
+                if (filters.start_date) queryParams.append('start_date', filters.start_date);
+                if (filters.end_date) queryParams.append('end_date', filters.end_date);
+                // Fetch a reasonable number of results per database type
+                queryParams.append('limit', '500');
+                
+                const response = await fetch(`${API_BASE}?${queryParams}`);
+                const data = await response.json();
+                const results = data.results || [];
+                console.log(`Fetched ${results.length} results for database type: ${dbType}`);
+                return results;
+            });
+            
+            const resultsArrays = await Promise.all(fetchPromises);
+            allResults = resultsArrays.flat();
+            console.log(`Total results fetched: ${allResults.length}`);
+            
+            // Sort by timestamp descending (most recent first)
+            allResults.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        } else {
+            // If database type filter is applied, use the normal approach
+            const queryParams = new URLSearchParams();
+            queryParams.append('database_type', filters.database_type);
+            if (filters.database_version) queryParams.append('database_version', filters.database_version);
+            if (filters.start_date) queryParams.append('start_date', filters.start_date);
+            if (filters.end_date) queryParams.append('end_date', filters.end_date);
+            queryParams.append('limit', '100');
+            
+            const response = await fetch(`${API_BASE}?${queryParams}`);
+            const data = await response.json();
+            allResults = data.results || [];
+        }
         
-        const response = await fetch(`${API_BASE}?${queryParams}`);
-        const data = await response.json();
-        
-        updateTable(data.results);
-        updateCharts(data.results);
+        updateTable(allResults);
+        updateCharts(allResults);
     } catch (error) {
         console.error('Error loading results:', error);
         showError('Failed to load results: ' + error.message);
@@ -108,21 +144,140 @@ function updateTable(results) {
     });
 }
 
+// Color mapping for database types
+function getColorForDatabaseType(dbType) {
+    const colorMap = {
+        'mongodb': '#667eea',
+        'documentdb': '#764ba2',
+        'postgresql': '#f093fb',
+        'oracle': '#4facfe',
+        'oracle23ai': '#00d2ff',
+        'unknown': '#95a5a6'
+    };
+    return colorMap[dbType?.toLowerCase()] || colorMap['unknown'];
+}
+
+// Helper function to sort payload sizes and align data
+function sortAndAlignData(groups, payloadKey, dataKey) {
+    // Collect all unique payload sizes
+    const allPayloadSizes = new Set();
+    Object.values(groups).forEach(group => {
+        (group[payloadKey] || []).forEach(size => allPayloadSizes.add(size));
+    });
+    
+    // Sort payload sizes numerically
+    const sortedPayloadSizes = Array.from(allPayloadSizes).sort((a, b) => a - b);
+    
+    // Create labels
+    const labels = sortedPayloadSizes.map(s => `${s}B`);
+    
+    // Align data for each group
+    const alignedDatasets = Object.values(groups).map((group) => {
+        const payloadArray = group[payloadKey] || [];
+        const dataArray = group[dataKey] || [];
+        const dbType = group.dbType || 'unknown';
+        const color = getColorForDatabaseType(dbType);
+        
+        // Create a map of payload size to array of data values (to handle multiple values per size)
+        const dataMap = new Map();
+        payloadArray.forEach((size, idx) => {
+            if (!dataMap.has(size)) {
+                dataMap.set(size, []);
+            }
+            if (dataArray[idx] != null && dataArray[idx] !== undefined) {
+                dataMap.get(size).push(dataArray[idx]);
+            }
+        });
+        
+        // Create aligned data array - average multiple values for the same payload size
+        const alignedData = sortedPayloadSizes.map(size => {
+            const values = dataMap.get(size);
+            if (!values || values.length === 0) {
+                return null;
+            }
+            // Average multiple values for the same payload size
+            const sum = values.reduce((a, b) => a + b, 0);
+            return sum / values.length;
+        });
+        
+        const dataset = {
+            label: group.label,
+            data: alignedData,
+            backgroundColor: color,
+            borderColor: color,
+            borderWidth: 2
+        };
+        
+        console.log(`Creating dataset for ${dataKey}:`, {
+            label: dataset.label,
+            dbType: dbType,
+            color: color,
+            dataPoints: alignedData.filter(d => d !== null).length,
+            totalDataPoints: alignedData.length
+        });
+        
+        return dataset;
+    });
+    
+    console.log(`Created ${alignedDatasets.length} datasets for ${dataKey}`);
+    return { labels, datasets: alignedDatasets };
+}
+
 function updateCharts(results) {
     // Filter successful results
     const successful = results.filter(r => r.results?.success);
+    console.log(`Updating charts with ${successful.length} successful results out of ${results.length} total`);
     
-    // Group by database type and version
+    // Debug: Check mongodb vs documentdb results
+    const mongodbResults = successful.filter(r => r.database?.type?.toLowerCase() === 'mongodb');
+    const documentdbResults = successful.filter(r => r.database?.type?.toLowerCase() === 'documentdb');
+    console.log(`MongoDB results: ${mongodbResults.length}, DocumentDB results: ${documentdbResults.length}`);
+    
+    // Check test_run_id for mongodb results
+    if (mongodbResults.length > 0) {
+        const mongodbTestRunIds = new Set(mongodbResults.map(r => r.test_run_id || 'missing'));
+        console.log(`MongoDB test_run_ids:`, Array.from(mongodbTestRunIds));
+        console.log(`Sample MongoDB result:`, {
+            test_run_id: mongodbResults[0].test_run_id,
+            hasInsertTime: !!mongodbResults[0].results?.insert_time_ms,
+            hasQueryTime: !!mongodbResults[0].results?.query_time_ms,
+            hasThroughput: !!mongodbResults[0].results?.insert_throughput
+        });
+    }
+    
+    // Group by test_run_id AND database type (since same test_run_id can have different db types)
     const grouped = {};
+    const dbTypesSeen = new Set();
+    const dbTypeCounts = {};
     successful.forEach(result => {
-        const key = `${result.database?.type || 'unknown'}-${result.database?.version || 'unknown'}`;
+        const testRunId = result.test_run_id || 'unknown';
+        const dbType = result.database?.type || 'unknown';
+        // Include database type in the key to separate MongoDB and DocumentDB results with same test_run_id
+        const key = `${testRunId}-${dbType}`;
+        dbTypesSeen.add(dbType);
+        
+        // Count results by database type
+        if (!dbTypeCounts[dbType]) {
+            dbTypeCounts[dbType] = { total: 0, withInsertTime: 0, withQueryTime: 0, withThroughput: 0 };
+        }
+        dbTypeCounts[dbType].total++;
+        if (result.results?.insert_time_ms) dbTypeCounts[dbType].withInsertTime++;
+        if (result.results?.query_time_ms) dbTypeCounts[dbType].withQueryTime++;
+        if (result.results?.insert_throughput) dbTypeCounts[dbType].withThroughput++;
+        
         if (!grouped[key]) {
+            // Create a descriptive label with test_run_id and database info
+            const dbVersion = result.database?.version || 'unknown';
+            const label = `${testRunId} (${dbType}-${dbVersion})`;
             grouped[key] = {
-                label: key,
+                label: label,
+                dbType: dbType,
                 insertTimes: [],
                 queryTimes: [],
                 throughputs: [],
-                payloadSizes: []
+                payloadSizes: [],
+                queryPayloadSizes: [],
+                throughputPayloadSizes: []
             };
         }
         
@@ -133,12 +288,35 @@ function updateCharts(results) {
         
         if (result.results?.query_time_ms) {
             grouped[key].queryTimes.push(result.results.query_time_ms);
+            grouped[key].queryPayloadSizes = grouped[key].queryPayloadSizes || [];
+            grouped[key].queryPayloadSizes.push(result.test_config?.payload_size || 0);
         }
         
         if (result.results?.insert_throughput) {
             grouped[key].throughputs.push(result.results.insert_throughput);
+            // Track payload size for throughputs (use same as insert if available, otherwise track separately)
+            if (!grouped[key].throughputPayloadSizes) {
+                grouped[key].throughputPayloadSizes = [];
+            }
+            grouped[key].throughputPayloadSizes.push(result.test_config?.payload_size || 0);
         }
     });
+    
+    console.log(`Database types found in results:`, Array.from(dbTypesSeen));
+    console.log('Database type counts:', dbTypeCounts);
+    console.log(`Number of test runs (groups): ${Object.keys(grouped).length}`);
+    console.log('Grouped data:', Object.keys(grouped).map(key => ({
+        key,
+        label: grouped[key].label,
+        dbType: grouped[key].dbType,
+        insertCount: grouped[key].insertTimes.length,
+        queryCount: grouped[key].queryTimes.length
+    })));
+    
+    // Check if mongodb results are being grouped
+    const mongodbGroups = Object.values(grouped).filter(g => g.dbType.toLowerCase() === 'mongodb');
+    const documentdbGroups = Object.values(grouped).filter(g => g.dbType.toLowerCase() === 'documentdb');
+    console.log(`MongoDB groups: ${mongodbGroups.length}, DocumentDB groups: ${documentdbGroups.length}`);
     
     // Update insertion chart
     updateInsertionChart(grouped);
@@ -157,21 +335,12 @@ function updateInsertionChart(grouped) {
         insertionChart.destroy();
     }
     
-    const datasets = Object.values(grouped).map((group, index) => {
-        const colors = ['#667eea', '#764ba2', '#f093fb', '#4facfe'];
-        return {
-            label: group.label,
-            data: group.insertTimes,
-            backgroundColor: colors[index % colors.length],
-            borderColor: colors[index % colors.length],
-            borderWidth: 2
-        };
-    });
+    const { labels, datasets } = sortAndAlignData(grouped, 'payloadSizes', 'insertTimes');
     
     insertionChart = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: Object.values(grouped)[0]?.payloadSizes.map(s => `${s}B`) || [],
+            labels: labels,
             datasets: datasets
         },
         options: {
@@ -203,21 +372,22 @@ function updateQueryChart(grouped) {
         queryChart.destroy();
     }
     
-    const datasets = Object.values(grouped).map((group, index) => {
-        const colors = ['#667eea', '#764ba2', '#f093fb', '#4facfe'];
-        return {
-            label: group.label,
-            data: group.queryTimes,
-            backgroundColor: colors[index % colors.length],
-            borderColor: colors[index % colors.length],
-            borderWidth: 2
-        };
+    // Use queryPayloadSizes if available, otherwise fall back to payloadSizes
+    const payloadKey = Object.values(grouped).some(g => g.queryPayloadSizes?.length > 0) 
+        ? 'queryPayloadSizes' 
+        : 'payloadSizes';
+    
+    const { labels, datasets } = sortAndAlignData(grouped, payloadKey, 'queryTimes');
+    
+    // Add fill: false to datasets for line chart styling
+    datasets.forEach(dataset => {
+        dataset.fill = false;
     });
     
     queryChart = new Chart(ctx, {
-        type: 'bar',
+        type: 'line',
         data: {
-            labels: Object.keys(grouped),
+            labels: labels,
             datasets: datasets
         },
         options: {
@@ -229,6 +399,12 @@ function updateQueryChart(grouped) {
                     title: {
                         display: true,
                         text: 'Query Time (ms)'
+                    }
+                },
+                x: {
+                    title: {
+                        display: true,
+                        text: 'Payload Size'
                     }
                 }
             }
@@ -243,21 +419,17 @@ function updateThroughputChart(grouped) {
         throughputChart.destroy();
     }
     
-    const datasets = Object.values(grouped).map((group, index) => {
-        const colors = ['#667eea', '#764ba2', '#f093fb', '#4facfe'];
-        return {
-            label: group.label,
-            data: group.throughputs,
-            backgroundColor: colors[index % colors.length],
-            borderColor: colors[index % colors.length],
-            borderWidth: 2
-        };
-    });
+    // Use throughputPayloadSizes if available, otherwise fall back to payloadSizes
+    const payloadKey = Object.values(grouped).some(g => g.throughputPayloadSizes?.length > 0) 
+        ? 'throughputPayloadSizes' 
+        : 'payloadSizes';
+    
+    const { labels, datasets } = sortAndAlignData(grouped, payloadKey, 'throughputs');
     
     throughputChart = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: Object.values(grouped)[0]?.payloadSizes.map(s => `${s}B`) || [],
+            labels: labels,
             datasets: datasets
         },
         options: {

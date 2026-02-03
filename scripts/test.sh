@@ -1,35 +1,285 @@
 #!/bin/bash
+# Docker-based multi-database benchmark testing script
+# Runs benchmarks against MongoDB, PostgreSQL, YugabyteDB, and CockroachDB
+# Results are automatically stored to MongoDB if configured
+
 # Get the project root (parent of scripts directory)
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPTS_DIR="$PROJECT_ROOT/scripts"
 cd "$PROJECT_ROOT"
 
-[ -f ./target/insertTest-1.0-jar-with-dependencies.jar ] ||
- mvn clean package
+# Configuration
+STORE_RESULTS=${STORE_RESULTS:-true}  # Set to false to disable MongoDB storage
+TEST_RUN_ID=${TEST_RUN_ID:-"test.sh-$(date +%Y%m%d-%H%M%S)-$$"}
+LOG_DIR="$PROJECT_ROOT/tmp/test_logs"
 
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Helper functions
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Create log directory
+mkdir -p "$LOG_DIR"
+
+# Build the project if needed
+[ -f ./target/insertTest-1.0-jar-with-dependencies.jar ] || {
+    log_info "Building project..."
+    mvn clean package -q
+}
+
+# Function to store results in MongoDB
+store_results() {
+    local db_type="$1"
+    local output_file="$2"
+
+    if [ "$STORE_RESULTS" != "true" ]; then
+        return 0
+    fi
+
+    if [ ! -f "$output_file" ]; then
+        log_warning "No output file to store for $db_type"
+        return 1
+    fi
+
+    log_info "Storing $db_type results to MongoDB..."
+    python3 "$SCRIPTS_DIR/store_benchmark_results.py" \
+        --db-type "$db_type" \
+        --test-run-id "$TEST_RUN_ID" \
+        --input-file "$output_file"
+
+    local exit_code=$?
+    if [ $exit_code -eq 0 ]; then
+        log_success "Results stored for $db_type"
+    else
+        log_warning "Failed to store results for $db_type (exit code: $exit_code)"
+    fi
+    return $exit_code
+}
+
+# Function to run benchmark and capture output
+run_benchmark() {
+    local db_type="$1"
+    local extra_flags="$2"
+    local output_file="$LOG_DIR/${db_type}_$(date +%Y%m%d_%H%M%S).log"
+
+    log_info "Running $db_type benchmark..."
+    echo "========================================" | tee "$output_file"
+    echo "Database: $db_type" | tee -a "$output_file"
+    echo "Timestamp: $(date)" | tee -a "$output_file"
+    echo "Test Run ID: $TEST_RUN_ID" | tee -a "$output_file"
+    echo "Extra flags: $extra_flags $*" | tee -a "$output_file"
+    echo "========================================" | tee -a "$output_file"
+
+    # Run the benchmark and capture output
+    java -jar ./target/insertTest-1.0-jar-with-dependencies.jar $extra_flags "$@" 2>&1 | tee -a "$output_file"
+    local exit_code=${PIPESTATUS[0]}
+
+    if [ $exit_code -eq 0 ]; then
+        log_success "$db_type benchmark completed"
+        # Store results to MongoDB
+        store_results "$db_type" "$output_file"
+    else
+        log_error "$db_type benchmark failed (exit code: $exit_code)"
+    fi
+
+    return $exit_code
+}
+
+# Function to cleanup Docker container
+cleanup_container() {
+    local container_name="$1"
+    docker rm -f "$container_name" 2>/dev/null || true
+}
+
+# Function to wait for database to be ready
+wait_for_db() {
+    local container_name="$1"
+    local check_cmd="$2"
+    local max_attempts="${3:-30}"
+    local attempt=1
+
+    log_info "Waiting for $container_name to be ready..."
+    while [ $attempt -le $max_attempts ]; do
+        if eval "$check_cmd" >/dev/null 2>&1; then
+            log_success "$container_name is ready"
+            return 0
+        fi
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+
+    log_error "$container_name failed to start after $max_attempts attempts"
+    return 1
+}
+
+# Print test run header
+echo ""
+echo "========================================"
+echo "  Docker-Based Database Benchmark"
+echo "========================================"
+echo "Test Run ID: $TEST_RUN_ID"
+echo "Store Results: $STORE_RESULTS"
+echo "Log Directory: $LOG_DIR"
+echo "Arguments: $*"
+echo "========================================"
+echo ""
+
+# Track overall success
+overall_success=true
+
+# ============================================
 # MongoDB
+# ============================================
+log_info "Starting MongoDB container..."
+cleanup_container "db"
 docker run --name db --rm -d -p 27017:27017 mongo
-sleep 30
-java -jar ./target/insertTest-1.0-jar-with-dependencies.jar $*
-docker rm -f db
 
+if wait_for_db "db" "docker exec db mongosh --eval 'db.runCommand({ping:1})'" 30; then
+    run_benchmark "mongodb" "" "$@" || overall_success=false
+else
+    log_error "MongoDB failed to start"
+    overall_success=false
+fi
+cleanup_container "db"
+
+echo ""
+
+# ============================================
+# DocumentDB (MongoDB-compatible, open-source)
+# ============================================
+log_info "Starting DocumentDB container..."
+cleanup_container "documentdb"
+
+# Pull and tag DocumentDB image if needed
+if ! docker images -q documentdb-local:latest | grep -q .; then
+    log_info "Pulling DocumentDB image..."
+    if docker pull ghcr.io/documentdb/documentdb/documentdb-local:latest; then
+        docker tag ghcr.io/documentdb/documentdb/documentdb-local:latest documentdb-local:latest
+        log_success "DocumentDB image ready"
+    else
+        log_error "Failed to pull DocumentDB image"
+        overall_success=false
+    fi
+fi
+
+# Start DocumentDB container (uses port 10260 internally)
+docker run --name documentdb --rm -d -p 10260:10260 documentdb-local:latest --username testuser --password testpass
+
+if wait_for_db "documentdb" "docker exec documentdb mongosh --quiet --eval 'db.runCommand({ping:1})' 2>/dev/null || nc -z localhost 10260" 60; then
+    # DocumentDB needs a moment to fully initialize
+    sleep 5
+    run_benchmark "documentdb" "-ddb" "$@" || overall_success=false
+else
+    log_error "DocumentDB failed to start"
+    overall_success=false
+fi
+cleanup_container "documentdb"
+
+echo ""
+
+# ============================================
 # PostgreSQL
+# ============================================
+log_info "Starting PostgreSQL container..."
+cleanup_container "db"
 docker run --name db --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=password postgres
-sleep 15
-until echo "create database test;" | docker exec -i db psql -U postgres ; do sleep 15 ; done
-java -jar ./target/insertTest-1.0-jar-with-dependencies.jar -p $*
-docker rm -f db
 
+if wait_for_db "db" "docker exec db pg_isready -U postgres" 30; then
+    # Create test database
+    until echo "CREATE DATABASE test;" | docker exec -i db psql -U postgres 2>/dev/null; do
+        sleep 2
+    done
+    run_benchmark "postgresql" "-p" "$@" || overall_success=false
+else
+    log_error "PostgreSQL failed to start"
+    overall_success=false
+fi
+cleanup_container "db"
+
+echo ""
+
+# ============================================
 # YugabyteDB
-docker run --name db -d -p 5432:5433 yugabytedb/yugabyte yugabyted start --background=false
-sleep 15
-until echo "create database test;" | docker exec -i db yugabyted connect ysql ; do sleep 15 ; done
-java -jar ./target/insertTest-1.0-jar-with-dependencies.jar -p $*
-docker rm -f db
+# ============================================
+log_info "Starting YugabyteDB container..."
+cleanup_container "db"
+docker run --name db -d -p 5433:5433 yugabytedb/yugabyte yugabyted start --background=false
 
+if wait_for_db "db" "docker exec db yugabyted status" 60; then
+    # Wait for YSQL to be ready and create test database
+    sleep 10
+    until echo "CREATE DATABASE test;" | docker exec -i db ysqlsh -U yugabyte 2>/dev/null; do
+        sleep 5
+    done
+    run_benchmark "yugabytedb" "-p" "$@" || overall_success=false
+else
+    log_error "YugabyteDB failed to start"
+    overall_success=false
+fi
+cleanup_container "db"
+
+echo ""
+
+# ============================================
 # CockroachDB
-docker run --name db -d -p 5432:26257 cockroachdb/cockroach bash -c "cockroach start-single-node --insecure"
-sleep 15
-until echo "create database test;" | docker exec -i db cockroach sql --insecure ; do sleep 15 ; done
-echo "create user postgres;" | docker exec -i db cockroach sql --insecure
-java -jar ./target/insertTest-1.0-jar-with-dependencies.jar -p $*
-docker rm -f db
+# ============================================
+log_info "Starting CockroachDB container..."
+cleanup_container "db"
+docker run --name db -d -p 26257:26257 cockroachdb/cockroach start-single-node --insecure
+
+if wait_for_db "db" "docker exec db cockroach sql --insecure -e 'SELECT 1'" 30; then
+    # Create test database and postgres user
+    echo "CREATE DATABASE test;" | docker exec -i db cockroach sql --insecure
+    echo "CREATE USER IF NOT EXISTS postgres;" | docker exec -i db cockroach sql --insecure
+    echo "GRANT ALL ON DATABASE test TO postgres;" | docker exec -i db cockroach sql --insecure
+    run_benchmark "cockroachdb" "-p" "$@" || overall_success=false
+else
+    log_error "CockroachDB failed to start"
+    overall_success=false
+fi
+cleanup_container "db"
+
+echo ""
+
+# ============================================
+# Summary
+# ============================================
+echo "========================================"
+echo "  Benchmark Summary"
+echo "========================================"
+echo "Test Run ID: $TEST_RUN_ID"
+echo "Log files saved to: $LOG_DIR"
+
+if [ "$STORE_RESULTS" = "true" ]; then
+    echo ""
+    echo "Results stored to MongoDB."
+    echo "View results at: http://localhost:3000 (if webapp is running)"
+fi
+
+echo ""
+if [ "$overall_success" = true ]; then
+    log_success "All benchmarks completed successfully"
+    exit 0
+else
+    log_warning "Some benchmarks failed - check logs for details"
+    exit 1
+fi
