@@ -78,6 +78,9 @@ LARGE_MULTI_ATTR_TESTS = [
 DATABASES = [
     {"name": "MongoDB (BSON)", "key": "mongodb", "flags": "-i -rd", "container": "mongodb-benchmark", "db_type": "mongodb", "port": 27017, "image": "mongo"},
     {"name": "DocumentDB", "key": "documentdb", "flags": "-ddb -i -rd", "container": "documentdb-benchmark", "db_type": "documentdb", "port": 10260, "image": "documentdb-local"},
+    {"name": "PostgreSQL (JSONB)", "key": "postgresql", "flags": "-p -j -i -rd", "container": "postgres-benchmark", "db_type": "postgresql", "port": 5432, "image": "postgres:latest"},
+    {"name": "YugabyteDB (YSQL)", "key": "yugabytedb", "flags": "-p -i -rd", "container": "yugabyte-benchmark", "db_type": "yugabytedb", "port": 5433, "image": "yugabytedb/yugabyte:latest"},
+    {"name": "CockroachDB (SQL)", "key": "cockroachdb", "flags": "-p -i -rd", "container": "cockroach-benchmark", "db_type": "cockroachdb", "port": 26257, "image": "cockroachdb/cockroach:latest"},
 ]
 
 def load_benchmark_config():
@@ -311,6 +314,27 @@ def start_docker_container(db_info):
         if result.returncode != 0:
             return False, None
 
+    elif db_type == "postgresql":
+        # Start PostgreSQL container
+        cmd = f"docker run --name {container_name} --rm -d -p {port}:5432 -e POSTGRES_PASSWORD=password {image}"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            return False, None
+
+    elif db_type == "yugabytedb":
+        # Start YugabyteDB container
+        cmd = f"docker run --name {container_name} -d -p {port}:5433 {image} yugabyted start --background=false"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            return False, None
+
+    elif db_type == "cockroachdb":
+        # Start CockroachDB container
+        cmd = f"docker run --name {container_name} -d -p {port}:26257 {image} start-single-node --insecure"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            return False, None
+
     # Get Docker image version info
     version_info = {}
     if RESULTS_STORAGE_AVAILABLE:
@@ -349,7 +373,7 @@ def check_ready(container_name, db_type):
             if db['container'] == container_name:
                 db_info = db
                 break
-        
+
         if db_info:
             port = db_info['port']
             # Try to connect from host using mongosh if available, otherwise check port
@@ -370,7 +394,93 @@ def check_ready(container_name, db_type):
                 if check.returncode == 0:
                     return True
 
+    elif db_type == "postgresql":
+        # PostgreSQL readiness check
+        try:
+            check = subprocess.run(
+                f"docker exec {container_name} pg_isready -U postgres",
+                shell=True, capture_output=True, text=True, timeout=5
+            )
+            if check.returncode == 0:
+                return True
+        except subprocess.TimeoutExpired:
+            pass
+
+    elif db_type == "yugabytedb":
+        # YugabyteDB readiness check
+        try:
+            check = subprocess.run(
+                f"docker exec {container_name} yugabyted status",
+                shell=True, capture_output=True, text=True, timeout=10
+            )
+            if check.returncode == 0 and "Running" in check.stdout:
+                return True
+        except subprocess.TimeoutExpired:
+            pass
+
+    elif db_type == "cockroachdb":
+        # CockroachDB readiness check
+        try:
+            check = subprocess.run(
+                f"docker exec {container_name} cockroach sql --insecure -e 'SELECT 1'",
+                shell=True, capture_output=True, text=True, timeout=5
+            )
+            if check.returncode == 0:
+                return True
+        except subprocess.TimeoutExpired:
+            pass
+
     return False
+
+def initialize_database(container_name: str, db_type: str) -> bool:
+    """Initialize database after container is ready (create test db, users, etc.)
+
+    Args:
+        container_name: Name of the Docker container
+        db_type: Type of database
+
+    Returns:
+        True if initialization succeeded, False otherwise
+    """
+    try:
+        if db_type == "postgresql":
+            # Create test database
+            subprocess.run(
+                f'docker exec {container_name} psql -U postgres -c "CREATE DATABASE test;"',
+                shell=True, capture_output=True, timeout=30
+            )
+            return True
+
+        elif db_type == "yugabytedb":
+            # YugabyteDB needs extra time for YSQL
+            time.sleep(10)
+            subprocess.run(
+                f'docker exec {container_name} ysqlsh -U yugabyte -c "CREATE DATABASE test;"',
+                shell=True, capture_output=True, timeout=30
+            )
+            return True
+
+        elif db_type == "cockroachdb":
+            # Create test database and postgres user
+            subprocess.run(
+                f'docker exec {container_name} cockroach sql --insecure -e "CREATE DATABASE test;"',
+                shell=True, capture_output=True, timeout=30
+            )
+            subprocess.run(
+                f'docker exec {container_name} cockroach sql --insecure -e "CREATE USER IF NOT EXISTS postgres;"',
+                shell=True, capture_output=True, timeout=30
+            )
+            subprocess.run(
+                f'docker exec {container_name} cockroach sql --insecure -e "GRANT ALL ON DATABASE test TO postgres;"',
+                shell=True, capture_output=True, timeout=30
+            )
+            return True
+
+        # MongoDB and DocumentDB don't need initialization
+        return True
+    except Exception as e:
+        print(f"    ⚠️  Database initialization failed: {e}")
+        return False
 
 def start_database(container_name, db_type, config=None):
     """Start a Docker container and wait for it to be ready.
@@ -410,7 +520,11 @@ def start_database(container_name, db_type, config=None):
 
         if check_ready(container_name, db_type):
             print(f"✓ Ready (took {(i+1)*wait_interval}s)")
-            
+
+            # Initialize database (create test db, users, etc.)
+            if not initialize_database(container_name, db_type):
+                print(f"    ⚠️  Warning: Database initialization may have failed")
+
             # Get database version
             db_version = None
             if RESULTS_STORAGE_AVAILABLE:
@@ -439,11 +553,11 @@ def start_database(container_name, db_type, config=None):
                     db_version = get_database_version(db_type, connection_info)
                 except Exception:
                     pass
-            
+
             version_info = docker_version_info or {}
             if db_version:
                 version_info['database_version'] = db_version
-            
+
             return True, version_info
 
         # Show progress on first few attempts
@@ -593,8 +707,8 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
                     if db_type in ['mongodb', 'documentdb']:
                         client_library = 'mongodb-driver-sync'
                         client_version = get_client_library_version('mongodb-driver-sync')
-                    elif db_type == 'postgresql':
-                        client_library = 'postgresql'
+                    elif db_type in ['postgresql', 'yugabytedb', 'cockroachdb']:
+                        client_library = 'postgresql-jdbc'
                         client_version = get_client_library_version('postgresql')
                     elif db_type == 'oracle':
                         client_library = 'ojdbc11'
@@ -937,42 +1051,55 @@ def store_results_to_mongodb(results_dict, results_storage):
 
 def generate_summary_table(single_results, multi_results):
     """Generate a summary comparison table."""
-    print(f"\n{'='*80}")
+    # Get list of database keys that have results
+    all_db_keys = ['mongodb', 'documentdb', 'postgresql', 'yugabytedb', 'cockroachdb']
+    active_db_keys = [k for k in all_db_keys if k in single_results or k in multi_results]
+
+    # Column width for each database
+    col_width = 14
+
+    print(f"\n{'='*100}")
     print("SUMMARY: Single-Attribute Results (10K documents) - All with indexes")
-    print(f"{'='*80}")
-    print(f"{'Payload':<12} {'MongoDB':<12} {'DocumentDB':<12}")
-    print("-" * 80)
+    print(f"{'='*100}")
+    header = f"{'Payload':<12}"
+    for db_key in active_db_keys:
+        header += f" {db_key:<{col_width}}"
+    print(header)
+    print("-" * 100)
 
     for i, test in enumerate(SINGLE_ATTR_TESTS):
         row = f"{test['size']}B"
-        for db_key in ['mongodb', 'documentdb']:
+        for db_key in active_db_keys:
             if db_key in single_results and i < len(single_results[db_key]):
                 result = single_results[db_key][i]
                 if result['success']:
-                    row += f"  {result['time_ms']:>8}ms"
+                    row += f"  {result['time_ms']:>{col_width-2}}ms"
                 else:
-                    row += f"  {'FAIL':>8}  "
+                    row += f"  {'FAIL':>{col_width-2}}  "
             else:
-                row += f"  {'N/A':>8}  "
+                row += f"  {'N/A':>{col_width-2}}  "
         print(row)
 
-    print(f"\n{'='*80}")
+    print(f"\n{'='*100}")
     print("SUMMARY: Multi-Attribute Results (10K documents) - All with indexes")
-    print(f"{'='*80}")
-    print(f"{'Config':<20} {'MongoDB':<12} {'DocumentDB':<12}")
-    print("-" * 80)
+    print(f"{'='*100}")
+    header = f"{'Config':<20}"
+    for db_key in active_db_keys:
+        header += f" {db_key:<{col_width}}"
+    print(header)
+    print("-" * 100)
 
     for i, test in enumerate(MULTI_ATTR_TESTS):
         row = f"{test['attrs']}×{test['size']//test['attrs']}B"
-        for db_key in ['mongodb', 'documentdb']:
+        for db_key in active_db_keys:
             if db_key in multi_results and i < len(multi_results[db_key]):
                 result = multi_results[db_key][i]
                 if result['success']:
-                    row += f"  {result['time_ms']:>8}ms"
+                    row += f"  {result['time_ms']:>{col_width-2}}ms"
                 else:
-                    row += f"  {'FAIL':>8}  "
+                    row += f"  {'FAIL':>{col_width-2}}  "
             else:
-                row += f"  {'N/A':>8}  "
+                row += f"  {'N/A':>{col_width-2}}  "
         print(row)
 
 def run_full_comparison_suite(args):
@@ -1182,6 +1309,9 @@ def main():
                         help='Randomize test execution order (with-index first or no-index first) to eliminate execution order bias')
     parser.add_argument('--mongodb', action='store_true', help='Run MongoDB tests')
     parser.add_argument('--documentdb', action='store_true', help='Run DocumentDB tests')
+    parser.add_argument('--postgresql', action='store_true', help='Run PostgreSQL tests')
+    parser.add_argument('--yugabytedb', action='store_true', help='Run YugabyteDB tests')
+    parser.add_argument('--cockroachdb', action='store_true', help='Run CockroachDB tests')
     parser.add_argument('--batch-size', '-b', type=int, default=BATCH_SIZE,
                         help=f'Batch size for insertions (default: {BATCH_SIZE})')
     parser.add_argument('--num-docs', '-n', type=int, default=NUM_DOCS,
@@ -1219,11 +1349,14 @@ def main():
         print("\n✓ Large item tests enabled (10KB, 100KB, 1000KB)")
 
     # Filter databases based on arguments (if no args, run all)
-    if args.mongodb or args.documentdb:
+    if args.mongodb or args.documentdb or args.postgresql or args.yugabytedb or args.cockroachdb:
         enabled_databases = []
         for db in DATABASES:
             if (args.mongodb and db['db_type'] == 'mongodb') or \
-               (args.documentdb and db['db_type'] == 'documentdb'):
+               (args.documentdb and db['db_type'] == 'documentdb') or \
+               (args.postgresql and db['db_type'] == 'postgresql') or \
+               (args.yugabytedb and db['db_type'] == 'yugabytedb') or \
+               (args.cockroachdb and db['db_type'] == 'cockroachdb'):
                 enabled_databases.append(db)
         DATABASES = enabled_databases
 

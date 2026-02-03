@@ -89,6 +89,10 @@ public class Main {
                     dbType = "oraclejct";
                     break;
 
+                case "-ddb":
+                    dbType = "documentdb";
+                    break;
+
                 case "-d":
                     System.out.println("Using direct table insertion (Oracle only)...");
                     useDirectTableInsert = true;
@@ -199,6 +203,8 @@ public class Main {
             connectionString = dbConfig.getProperty("postgresql.connection.string");
         } else if (dbType.equals("oracle23ai") || dbType.equals("oraclejct")) {
             connectionString = dbConfig.getProperty("oracle.connection.string");
+        } else if (dbType.equals("documentdb")) {
+            connectionString = dbConfig.getProperty("documentdb.connection.string");
         } else {
             connectionString = dbConfig.getProperty("mongodb.connection.string");
         }
@@ -251,6 +257,8 @@ public class Main {
             dbOperations = new Oracle23AIOperations();
         } else if (dbType.equals("oraclejct")) {
             dbOperations = new OracleJCT();
+        } else if (dbType.equals("documentdb")) {
+            dbOperations = new DocumentDBOperations();
         } else {
             dbOperations = new MongoDBOperations();
         }
