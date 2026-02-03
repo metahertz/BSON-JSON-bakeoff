@@ -109,30 +109,90 @@ def get_database_version(db_type: str, connection_info: Dict[str, Any]) -> Optio
 
 
 def _get_mongodb_version(connection_info: Dict[str, Any]) -> Optional[str]:
-    """Get MongoDB version."""
+    """Get MongoDB/DocumentDB version."""
     try:
         host = connection_info.get('host', 'localhost')
         port = connection_info.get('port', 27017)
+        user = connection_info.get('user')
+        password = connection_info.get('password')
+        database = connection_info.get('database', 'admin')
         
-        # Try using mongosh if available
-        cmd = f"mongosh --quiet --host {host} --port {port} --eval 'db.version()'"
+        # Try using pymongo first (more reliable, works without mongosh)
+        try:
+            from pymongo import MongoClient
+            import urllib.parse
+            
+            # Build connection URI
+            if user and password:
+                encoded_password = urllib.parse.quote(password, safe='')
+                connection_uri = f"mongodb://{user}:{encoded_password}@{host}:{port}/{database}"
+            else:
+                connection_uri = f"mongodb://{host}:{port}/{database}"
+            
+            # Connect and get version
+            client = MongoClient(connection_uri, serverSelectionTimeoutMS=5000)
+            # Try buildInfo first (standard MongoDB command)
+            try:
+                version_info = client.admin.command('buildInfo')
+                if version_info and 'version' in version_info:
+                    version = version_info['version']
+                    client.close()
+                    return version
+            except Exception:
+                # buildInfo might not be supported, try db.version() instead
+                pass
+            
+            # Fallback: try db.version() method (what mongosh uses)
+            try:
+                db = client.get_database(database if database else 'admin')
+                version = db.command('eval', 'db.version()')
+                if version:
+                    # version might be a dict with 'retval' key
+                    if isinstance(version, dict) and 'retval' in version:
+                        version = version['retval']
+                    client.close()
+                    return str(version).strip('"\'')
+            except Exception:
+                pass
+            
+            client.close()
+        except ImportError:
+            # pymongo not available, fall back to mongosh
+            pass
+        except Exception as e:
+            logger.debug(f"pymongo connection failed, trying mongosh: {e}")
+        
+        # Fallback: Try using mongosh if available
+        if user and password:
+            # Use connection URI format for authentication
+            import urllib.parse
+            encoded_password = urllib.parse.quote(password, safe='')
+            connection_uri = f"mongodb://{user}:{encoded_password}@{host}:{port}/{database}"
+            cmd = f"mongosh --quiet '{connection_uri}' --eval 'db.version()'"
+        else:
+            # No authentication
+            cmd = f"mongosh --quiet --host {host} --port {port} --eval 'db.version()'"
+        
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
             version = result.stdout.strip()
             # Remove quotes if present
             version = version.strip('"\'')
-            return version
+            if version:  # Only return if we got a non-empty version
+                return version
         
-        # Fallback: try docker exec if container name provided
+        # Fallback: try docker exec if container name provided (only for MongoDB, not DocumentDB)
+        # DocumentDB containers don't have mongosh installed
         container = connection_info.get('container')
-        if container:
+        if container and not user:  # Only use docker exec for MongoDB (no auth)
             cmd = f"docker exec {container} mongosh --quiet --eval 'db.version()'"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 version = result.stdout.strip().strip('"\'')
-                return version
+                if version:
+                    return version
     except Exception as e:
-        logger.warning(f"Failed to get MongoDB version: {e}")
+        logger.warning(f"Failed to get MongoDB/DocumentDB version: {e}")
     return None
 
 
@@ -319,6 +379,15 @@ def get_all_versions(db_type: str, image_name: str, container_name: Optional[str
     # Get database version
     if connection_info:
         db_version = get_database_version(db_type, connection_info)
+        # For DocumentDB, if direct connection fails, try to extract version from image tag
+        if not db_version and db_type == "documentdb" and docker_info.get("tag"):
+            # DocumentDB image tags often contain version info
+            tag = docker_info.get("tag", "")
+            # Try to extract version from tag (e.g., "1.0.0" or "v1.0.0")
+            import re
+            version_match = re.search(r'v?(\d+\.\d+(?:\.\d+)?)', tag)
+            if version_match:
+                db_version = version_match.group(1)
         versions["database"]["version"] = db_version
     
     # Get client library version

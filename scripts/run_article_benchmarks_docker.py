@@ -421,6 +421,21 @@ def start_database(container_name, db_type, config=None):
                         'port': db_info['port'],
                         'container': container_name
                     }
+                    # Add authentication for DocumentDB
+                    if db_type == 'documentdb':
+                        # Load config to get DocumentDB credentials
+                        try:
+                            config = load_benchmark_config()
+                            if config.has_section('documentdb'):
+                                connection_info['user'] = config.get('documentdb', 'user', fallback='testuser')
+                                connection_info['password'] = config.get('documentdb', 'password', fallback='testpass')
+                                connection_info['database'] = config.get('documentdb', 'database', fallback='test')
+                        except Exception as e:
+                            # Fallback to hardcoded defaults if config fails
+                            print(f"    ⚠️  Warning: Could not load config for DocumentDB credentials: {e}")
+                            connection_info['user'] = 'testuser'
+                            connection_info['password'] = 'testpass'
+                            connection_info['database'] = 'test'
                     db_version = get_database_version(db_type, connection_info)
                 except Exception:
                     pass
@@ -466,6 +481,11 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
     cmd += f" {num_docs}"
 
     try:
+        # Check if JAR file exists
+        if not os.path.exists(JAR_PATH):
+            print(f"    ERROR: JAR file not found: {JAR_PATH}")
+            return {"success": False, "error": f"JAR file not found: {JAR_PATH}"}
+        
         result = subprocess.run(
             cmd,
             shell=True,
@@ -519,7 +539,24 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
                         "throughput": throughput
                     })
                 else:
+                    # Enhanced error reporting
                     print(f"    Warning: Could not parse output")
+                    print(f"    Command: {cmd}")
+                    if result.returncode != 0:
+                        print(f"    Java process exited with code: {result.returncode}")
+                    if result.stderr:
+                        stderr_preview = result.stderr.strip()
+                        if len(stderr_preview) > 500:
+                            stderr_preview = stderr_preview[:500] + "..."
+                        print(f"    stderr: {stderr_preview}")
+                    if result.stdout:
+                        # Show last few lines of stdout for debugging
+                        stdout_lines = result.stdout.strip().split('\n')
+                        print(f"    stdout (last 10 lines):")
+                        for line in stdout_lines[-10:]:
+                            print(f"      {line}")
+                    else:
+                        print(f"    No output captured from Java process")
                     return {"success": False, "error": "Could not parse output"}
 
         # If query tests were requested, parse query results
@@ -1155,8 +1192,10 @@ def main():
                         help=f'Number of array elements for query tests (default: {QUERY_LINKS})')
     parser.add_argument('--measure-sizes', action='store_true',
                         help='Enable BSON/OSON object size measurement and comparison')
-    parser.add_argument('--no-monitor', dest='monitor', action='store_false', default=True,
-                        help='Disable system resource monitoring (monitoring is enabled by default)')
+    parser.add_argument('--monitor', action='store_true', default=True,
+                        help='Enable system resource monitoring (CPU, disk, network) every 5 seconds (default: enabled)')
+    parser.add_argument('--no-monitor', dest='monitor', action='store_false',
+                        help='Disable system resource monitoring')
     parser.add_argument('--monitor-interval', type=int, default=5,
                         help='Resource monitoring interval in seconds (default: 5)')
     parser.add_argument('--large-items', action='store_true',
