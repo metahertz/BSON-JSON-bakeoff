@@ -35,6 +35,7 @@ public class Main {
     public static boolean useAsyncCommit = false;
     public static boolean measureObjectSizes = false;
     public static boolean gatherOracleStats = true;  // Default: enabled
+    public static boolean validateResults = false;  // Validation mode for data integrity checks
 
     // Variables to track BSON object sizes
     private static long totalBsonSize = 0;
@@ -121,6 +122,12 @@ public class Main {
                 case "-nostats":
                     System.out.println("Disabling Oracle statistics gathering...");
                     gatherOracleStats = false;
+                    break;
+
+                case "-v":
+                case "-validate":
+                    System.out.println("Validation mode enabled - will verify data integrity...");
+                    validateResults = true;
                     break;
 
                 case "-r":
@@ -735,6 +742,38 @@ public class Main {
                 if (timeTaken < bestMultiAttrTime && timeTaken > 0) {
                     bestMultiAttrTime = timeTaken;
                 }
+
+                // Validation phase - verify insertion results
+                if (validateResults) {
+                    System.out.println("  Validating insertion results...");
+
+                    // Verify document count
+                    long actualCount = dbOperations.getDocumentCount(collectionName);
+                    if (actualCount != docsToInsert.size()) {
+                        System.err.println(String.format("  ✗ VALIDATION FAILED: Document count mismatch - expected %d, found %d",
+                            docsToInsert.size(), actualCount));
+                    } else {
+                        System.out.println(String.format("  ✓ Document count verified: %d", actualCount));
+                    }
+
+                    // Sample validation (check 1% of documents, minimum 10)
+                    int sampleSize = Math.max(10, docsToInsert.size() / 100);
+                    int validatedCount = 0;
+                    java.util.Random sampleRand = new java.util.Random(42);
+                    for (int i = 0; i < sampleSize; i++) {
+                        int idx = sampleRand.nextInt(docsToInsert.size());
+                        JSONObject doc = docsToInsert.get(idx);
+                        if (dbOperations.validateDocument(collectionName, doc.getString("_id"), doc)) {
+                            validatedCount++;
+                        }
+                    }
+                    System.out.println(String.format("  ✓ Sample validation: %d/%d documents verified", validatedCount, sampleSize));
+
+                    if (validatedCount < sampleSize) {
+                        System.err.println(String.format("  ✗ VALIDATION WARNING: %d/%d sample documents failed validation",
+                            (sampleSize - validatedCount), sampleSize));
+                    }
+                }
             }
 
             // Query documents by ID for "indexed" collection
@@ -767,6 +806,24 @@ public class Main {
                 if (totalQueryTime < bestQueryTime) {
                     bestQueryTime = totalQueryTime;
                     itemsFound = totalItemsFound;
+                }
+
+                // Validation phase - verify query results match expected count
+                if (validateResults) {
+                    System.out.println("  Validating query results...");
+                    // Expected items: For multikey index queries, each doc has numLinks array elements
+                    // When querying by each ID, we should find documents that have that ID in their targets array
+                    // The total items found depends on the random distribution of targets
+                    // We can't predict exact count, but we can verify it's reasonable (non-zero and not exceeding max possible)
+                    int maxPossibleItems = objectIds.size() * numLinks;  // Upper bound
+                    if (totalItemsFound > 0 && totalItemsFound <= maxPossibleItems) {
+                        System.out.println(String.format("  ✓ Query count verified: %d items found (max possible: %d)", totalItemsFound, maxPossibleItems));
+                    } else if (totalItemsFound == 0) {
+                        System.err.println("  ✗ VALIDATION FAILED: No items found - queries may have failed");
+                    } else {
+                        System.err.println(String.format("  ✗ VALIDATION WARNING: Unexpected item count - found %d (max expected: %d)",
+                            totalItemsFound, maxPossibleItems));
+                    }
                 }
             }
         }

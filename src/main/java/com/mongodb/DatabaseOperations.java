@@ -20,5 +20,23 @@ public interface DatabaseOperations {
      */
     long getAverageDocumentSize(String collectionName);
 
+    /**
+     * Get the total number of documents in the collection.
+     * Used for validation to verify insertion counts.
+     * @param collectionName The collection/table name
+     * @return Number of documents, or -1 if error
+     */
+    long getDocumentCount(String collectionName);
+
+    /**
+     * Validate that a document exists and matches expected content.
+     * Used for sample validation after insertion.
+     * @param collectionName The collection/table name
+     * @param id The document ID to validate
+     * @param expected The expected document content (at minimum, _id should match)
+     * @return true if document exists and key fields match, false otherwise
+     */
+    boolean validateDocument(String collectionName, String id, JSONObject expected);
+
     void close();
 }

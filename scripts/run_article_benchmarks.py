@@ -326,7 +326,7 @@ def cleanup_database_files(db_type):
     print("✓ Cleaned")
     time.sleep(1)
 
-def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_links=None, measure_sizes=False, db_name="unknown"):
+def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_links=None, measure_sizes=False, db_name="unknown", validate=False):
     """Run a single benchmark test, optionally with query tests."""
 
     cmd = f"java -jar {JAR_PATH} {db_flags} -s {size} -n {attrs} -r {num_runs} -b {batch_size}"
@@ -334,6 +334,10 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
     # Add size measurement flag if specified
     if measure_sizes:
         cmd += " -size"
+
+    # Add validation flag if specified
+    if validate:
+        cmd += " -v"
 
     # Add query test flag if specified
     if query_links is not None:
@@ -428,7 +432,7 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
         print(f"    ERROR: {str(e)}")
         return {"success": False, "error": str(e)}
 
-def run_test_suite(test_configs, test_type, enable_queries=False, measure_sizes=False, track_activity=False, activity_log=None, config=None):
+def run_test_suite(test_configs, test_type, enable_queries=False, measure_sizes=False, track_activity=False, activity_log=None, config=None, validate=False):
     """Run a complete test suite (single or multi attribute).
 
     Args:
@@ -437,6 +441,7 @@ def run_test_suite(test_configs, test_type, enable_queries=False, measure_sizes=
         test_type: Description of test type
         enable_queries: Whether to run query tests
         measure_sizes: Whether to enable BSON/OSON object size measurement
+        validate: If True, enable data integrity validation
         track_activity: If True, record database start/stop timestamps
         activity_log: List to append activity events to (format: {db_name, event, timestamp})
     """
@@ -507,7 +512,8 @@ def run_test_suite(test_configs, test_type, enable_queries=False, measure_sizes=
                 BATCH_SIZE,
                 query_links=QUERY_LINKS if enable_queries else None,
                 measure_sizes=measure_sizes,
-                db_name=db['name']
+                db_name=db['name'],
+                validate=validate
             )
 
             if result['success']:
@@ -640,8 +646,8 @@ def run_full_comparison_suite(args):
         db['flags'] = db['flags'].replace(' -i', '').replace('-i ', '').replace(' -mv', '').replace('-mv ', '')
 
     # Run tests without indexes
-    single_results_noindex = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (NO INDEX)", enable_queries=False, measure_sizes=args.measure_sizes, config=config)
-    multi_results_noindex = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (NO INDEX)", enable_queries=False, measure_sizes=args.measure_sizes, config=config)
+    single_results_noindex = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (NO INDEX)", enable_queries=False, measure_sizes=args.measure_sizes, config=config, validate=args.validate)
+    multi_results_noindex = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (NO INDEX)", enable_queries=False, measure_sizes=args.measure_sizes, config=config, validate=args.validate)
 
     # ========== PART 2: WITH-INDEX TESTS ==========
     print(f"\n{'='*80}")
@@ -676,8 +682,8 @@ def run_full_comparison_suite(args):
     print()
 
     # Run tests with indexes and queries
-    single_results_indexed = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (WITH INDEX)", enable_queries=True, measure_sizes=args.measure_sizes, config=config)
-    multi_results_indexed = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (WITH INDEX)", enable_queries=True, measure_sizes=args.measure_sizes, config=config)
+    single_results_indexed = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (WITH INDEX)", enable_queries=True, measure_sizes=args.measure_sizes, config=config, validate=args.validate)
+    multi_results_indexed = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (WITH INDEX)", enable_queries=True, measure_sizes=args.measure_sizes, config=config, validate=args.validate)
 
     # Stop resource monitoring if running
     if monitor_proc is not None:
@@ -782,6 +788,8 @@ def main():
                         help='Disable Oracle statistics gathering (Oracle only)')
     parser.add_argument('--large-items', action='store_true',
                         help='Include large item tests (10KB, 100KB, 1000KB) in addition to standard tests')
+    parser.add_argument('--validate', action='store_true',
+                        help='Enable data integrity validation mode')
     args = parser.parse_args()
 
     # Load benchmark configuration
@@ -865,12 +873,12 @@ def main():
         # Run single-attribute tests
         single_results = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE", enable_queries=enable_queries,
                                        measure_sizes=args.measure_sizes, track_activity=True,
-                                       activity_log=activity_log, config=config)
+                                       activity_log=activity_log, config=config, validate=args.validate)
 
         # Run multi-attribute tests
         multi_results = run_test_suite(MULTI_ATTR_TESTS, "MULTI", enable_queries=enable_queries,
                                       measure_sizes=args.measure_sizes, track_activity=True,
-                                      activity_log=activity_log, config=config)
+                                      activity_log=activity_log, config=config, validate=args.validate)
 
         # Generate summary
         generate_summary_table(single_results, multi_results)

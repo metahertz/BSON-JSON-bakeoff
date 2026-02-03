@@ -354,6 +354,44 @@ public class OracleJCT implements DatabaseOperations {
     }
 
     @Override
+    public long getDocumentCount(String collectionName) {
+        try {
+            String sql = "SELECT COUNT(*) FROM \"" + collectionName + "\"";
+            try (PreparedStatement pstmt = connection.prepareStatement(sql);
+                 ResultSet rs = pstmt.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getLong(1);
+                }
+                return -1;
+            }
+        } catch (SQLException e) {
+            System.err.println("Error getting document count: " + e.getMessage());
+            return -1;
+        }
+    }
+
+    @Override
+    public boolean validateDocument(String collectionName, String id, JSONObject expected) {
+        try {
+            String sql = "SELECT data FROM \"" + collectionName + "\" WHERE JSON_VALUE(data, '$._id') = ?";
+            try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
+                pstmt.setString(1, id);
+                try (ResultSet rs = pstmt.executeQuery()) {
+                    if (rs.next()) {
+                        String jsonData = rs.getString(1);
+                        JSONObject doc = new JSONObject(jsonData);
+                        return doc.getString("_id").equals(expected.getString("_id"));
+                    }
+                    return false;
+                }
+            }
+        } catch (SQLException e) {
+            System.err.println("Error validating document: " + e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
     public void close() {
         try {
             if (connection != null && !connection.isClosed()) {

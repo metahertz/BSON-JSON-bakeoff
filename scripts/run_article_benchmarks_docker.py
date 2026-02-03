@@ -579,7 +579,7 @@ def cleanup_database_files(db_type):
     print(f"  Skipping file cleanup for {db_type} (Docker containers use --rm flag)", flush=True)
     return
 
-def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_links=None, measure_sizes=True, db_name="unknown", db_type=None, results_storage=None, test_run_id=None, database_info=None, system_info=None, ci_info=None, resource_summary=None):
+def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_links=None, measure_sizes=True, db_name="unknown", db_type=None, results_storage=None, test_run_id=None, database_info=None, system_info=None, ci_info=None, resource_summary=None, validate=False):
     """Run a single benchmark test, optionally with query tests."""
 
     cmd = f"java -jar {JAR_PATH} {db_flags} -s {size} -n {attrs} -r {num_runs} -b {batch_size}"
@@ -587,6 +587,10 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
     # Add size measurement flag if specified
     if measure_sizes:
         cmd += " -size"
+
+    # Add validation flag if specified
+    if validate:
+        cmd += " -v"
 
     # Add query test flag if specified
     if query_links is not None:
@@ -783,7 +787,7 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
         print(f"    ERROR: {str(e)}")
         return {"success": False, "error": str(e)}
 
-def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_test=False, measure_sizes=False, track_activity=False, activity_log=None, config=None, results_storage=None, test_run_id=None, system_info=None, ci_info=None, enable_monitoring=False, monitor_interval=5):
+def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_test=False, measure_sizes=False, track_activity=False, activity_log=None, config=None, results_storage=None, test_run_id=None, system_info=None, ci_info=None, enable_monitoring=False, monitor_interval=5, validate=False):
     """Run a complete test suite (single or multi attribute).
 
     Args:
@@ -797,6 +801,7 @@ def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_te
         activity_log: List to append activity events to (format: {db_name, event, timestamp})
         enable_monitoring: If True, start/stop resource monitoring for each test
         monitor_interval: Resource monitoring interval in seconds
+        validate: If True, enable data integrity validation
     """
     print(f"\n{'='*80}")
     print(f"{test_type.upper()} ATTRIBUTE TESTS" + (" WITH QUERIES" if enable_queries else ""))
@@ -863,7 +868,8 @@ def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_te
                     database_info=database_info,
                     system_info=system_info,
                     ci_info=ci_info,
-                    resource_summary=None  # Will be populated after monitoring stops
+                    resource_summary=None,  # Will be populated after monitoring stops
+                    validate=validate
                 )
 
                 # Stop resource monitoring and extract summary
@@ -977,7 +983,8 @@ def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_te
                     database_info=database_info,
                     system_info=system_info,
                     ci_info=ci_info,
-                    resource_summary=None  # Will be populated after monitoring stops
+                    resource_summary=None,  # Will be populated after monitoring stops
+                    validate=validate
                 )
 
                 # Stop resource monitoring and extract summary
@@ -1198,10 +1205,10 @@ def run_full_comparison_suite(args):
     # Run tests without indexes - restart database before each test for maximum isolation
     single_results_noindex = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (NO INDEX)", enable_queries=False, restart_per_test=True, measure_sizes=args.measure_sizes, config=config,
                                            results_storage=results_storage, test_run_id=test_run_id, system_info=system_info, ci_info=ci_info,
-                                           enable_monitoring=args.monitor, monitor_interval=args.monitor_interval)
+                                           enable_monitoring=args.monitor, monitor_interval=args.monitor_interval, validate=args.validate)
     multi_results_noindex = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (NO INDEX)", enable_queries=False, restart_per_test=True, measure_sizes=args.measure_sizes, config=config,
                                           results_storage=results_storage, test_run_id=test_run_id, system_info=system_info, ci_info=ci_info,
-                                          enable_monitoring=args.monitor, monitor_interval=args.monitor_interval)
+                                          enable_monitoring=args.monitor, monitor_interval=args.monitor_interval, validate=args.validate)
 
     # ========== PART 2: WITH-INDEX TESTS ==========
     print(f"\n{'='*80}")
@@ -1218,10 +1225,10 @@ def run_full_comparison_suite(args):
     # Run tests with indexes and queries - restart database before each test for maximum isolation
     single_results_indexed = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (WITH INDEX)", enable_queries=True, restart_per_test=True, measure_sizes=args.measure_sizes, config=config,
                                            results_storage=results_storage, test_run_id=test_run_id, system_info=system_info, ci_info=ci_info,
-                                           enable_monitoring=args.monitor, monitor_interval=args.monitor_interval)
+                                           enable_monitoring=args.monitor, monitor_interval=args.monitor_interval, validate=args.validate)
     multi_results_indexed = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (WITH INDEX)", enable_queries=True, restart_per_test=True, measure_sizes=args.measure_sizes, config=config,
                                           results_storage=results_storage, test_run_id=test_run_id, system_info=system_info, ci_info=ci_info,
-                                          enable_monitoring=args.monitor, monitor_interval=args.monitor_interval)
+                                          enable_monitoring=args.monitor, monitor_interval=args.monitor_interval, validate=args.validate)
 
     # ========== GENERATE COMPARISON SUMMARY ==========
     print(f"\n{'='*80}")
@@ -1330,6 +1337,8 @@ def main():
                         help='Resource monitoring interval in seconds (default: 5)')
     parser.add_argument('--large-items', action='store_true',
                         help='Include large item tests (10KB, 100KB, 1000KB) in addition to standard tests')
+    parser.add_argument('--validate', action='store_true',
+                        help='Enable data integrity validation mode')
     args = parser.parse_args()
 
     # Load benchmark configuration
@@ -1447,7 +1456,8 @@ def main():
                                        activity_log=activity_log, config=config,
                                        results_storage=results_storage, test_run_id=test_run_id,
                                        system_info=system_info, ci_info=ci_info,
-                                       enable_monitoring=args.monitor, monitor_interval=args.monitor_interval)
+                                       enable_monitoring=args.monitor, monitor_interval=args.monitor_interval,
+                                       validate=args.validate)
 
         # Run multi-attribute tests (with per-test monitoring if enabled)
         multi_results = run_test_suite(MULTI_ATTR_TESTS, "MULTI", enable_queries=enable_queries,
@@ -1455,7 +1465,8 @@ def main():
                                       activity_log=activity_log, config=config,
                                       results_storage=results_storage, test_run_id=test_run_id,
                                       system_info=system_info, ci_info=ci_info,
-                                      enable_monitoring=args.monitor, monitor_interval=args.monitor_interval)
+                                      enable_monitoring=args.monitor, monitor_interval=args.monitor_interval,
+                                      validate=args.validate)
 
         # Generate summary
         generate_summary_table(single_results, multi_results)
