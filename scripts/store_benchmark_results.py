@@ -12,11 +12,16 @@ import configparser
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Add scripts directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from results_storage import connect_to_mongodb, ResultsStorage
+from system_info_collector import get_system_info, get_ci_info
+from version_detector import get_client_library_version, get_java_version, get_docker_image_version
 
 
 def parse_benchmark_output(output: str, db_type: str, num_docs: int = 10000) -> list:
@@ -119,21 +124,94 @@ def get_db_version_from_output(output: str, db_type: str) -> str:
     return "unknown"
 
 
-def build_mongodb_document(parsed_result: Dict[str, Any], db_type: str,
-                          test_run_id: str, db_version: str = "unknown") -> Dict[str, Any]:
+def collect_metadata(db_type: str, docker_image: Optional[str] = None,
+                     container_name: Optional[str] = None) -> Dict[str, Any]:
     """
-    Build a MongoDB document in the standard schema.
+    Collect system info, CI info, client library version, and docker image details.
+    Called once per invocation and shared across all result documents.
+
+    Args:
+        db_type: Database type (for client library detection)
+        docker_image: Docker image name (e.g., "mongo", "postgres")
+        container_name: Docker container name (for image ID lookup)
+
+    Returns:
+        Dictionary with system_info, ci_info, client, docker, and java_version
+    """
+    metadata = {}
+
+    # System info (CPU, memory, OS, hostname)
+    try:
+        metadata["system_info"] = get_system_info()
+    except Exception as e:
+        logger.warning(f"Failed to collect system info: {e}")
+        metadata["system_info"] = {}
+
+    # CI environment detection
+    try:
+        metadata["ci_info"] = get_ci_info()
+    except Exception as e:
+        logger.warning(f"Failed to collect CI info: {e}")
+        metadata["ci_info"] = {"ci_run": False, "ci_platform": None, "commit_hash": None, "branch": None}
+
+    # Client library version from pom.xml
+    client_library = None
+    client_version = None
+    if db_type in ["mongodb", "documentdb"]:
+        client_library = "mongodb-driver-sync"
+        client_version = get_client_library_version("mongodb-driver-sync")
+    elif db_type in ["postgresql", "yugabytedb", "cockroachdb"]:
+        client_library = "postgresql-jdbc"
+        client_version = get_client_library_version("postgresql")
+    elif db_type == "oracle":
+        client_library = "ojdbc11"
+        client_version = get_client_library_version("ojdbc11")
+    metadata["client"] = {"library": client_library, "version": client_version}
+
+    # Java version
+    java_version = get_java_version()
+    metadata["java_version"] = java_version
+
+    # Docker image details
+    if docker_image:
+        try:
+            docker_info = get_docker_image_version(docker_image, container_name)
+            metadata["docker"] = {
+                "image": docker_image,
+                "tag": docker_info.get("tag", "latest"),
+                "image_id": docker_info.get("image_id", "")
+            }
+        except Exception as e:
+            logger.warning(f"Failed to collect docker image info: {e}")
+            metadata["docker"] = {"image": docker_image, "tag": None, "image_id": None}
+    else:
+        metadata["docker"] = {"image": None, "tag": None, "image_id": None}
+
+    return metadata
+
+
+def build_mongodb_document(parsed_result: Dict[str, Any], db_type: str,
+                          test_run_id: str, db_version: str = "unknown",
+                          metadata: Optional[Dict[str, Any]] = None,
+                          num_runs: int = 1, batch_size: int = 100) -> Dict[str, Any]:
+    """
+    Build a MongoDB document in the unified schema matching run_article_benchmarks_docker.py.
 
     Args:
         parsed_result: Parsed result from benchmark output
         db_type: Database type
         test_run_id: Unique identifier for this test run
         db_version: Database version string
+        metadata: Pre-collected metadata (system_info, ci_info, client, docker, java_version)
+        num_runs: Number of benchmark runs
+        batch_size: Batch size for bulk insertions
 
     Returns:
         Document ready for MongoDB insertion
     """
     is_insert = parsed_result.get("type") == "insert"
+    is_query = parsed_result.get("type") == "query"
+    metadata = metadata or {}
 
     # Determine test type based on attributes
     num_attrs = parsed_result.get("num_attributes", 1)
@@ -144,37 +222,62 @@ def build_mongodb_document(parsed_result: Dict[str, Any], db_type: str,
     else:
         test_type = "multi_attr"
 
+    # Client info from metadata (with fallbacks)
+    client_info = metadata.get("client", {})
+    client_library = client_info.get("library") or (
+        "mongodb-driver-sync" if db_type in ["mongodb", "documentdb"] else f"{db_type}-jdbc"
+    )
+    client_version = client_info.get("version")
+
+    # Docker info from metadata
+    docker_info = metadata.get("docker", {})
+
+    # Build query_links value
+    query_links = parsed_result.get("link_elements") if is_query else None
+
     doc = {
         "timestamp": datetime.now(timezone.utc),
         "test_run_id": test_run_id,
         "database": {
             "type": db_type,
-            "version": db_version
+            "version": db_version,
+            "docker_image": docker_info.get("image") or "unknown",
+            "docker_image_tag": docker_info.get("tag"),
+            "docker_image_id": docker_info.get("image_id")
         },
         "client": {
-            "library": "mongodb-driver-sync" if db_type in ["mongodb", "documentdb"] else f"{db_type}-jdbc",
-            "version": "unknown"
+            "library": client_library,
+            "version": client_version
         },
         "test_config": {
+            "num_docs": parsed_result.get("num_docs", 10000),
+            "num_runs": num_runs,
+            "batch_size": batch_size,
             "test_type": test_type,
             "payload_size": parsed_result.get("payload_size", 0),
-            "indexed": parsed_result.get("indexed", False),
             "num_attributes": num_attrs if num_attrs != "realistic" else 0,
-            "num_docs": parsed_result.get("num_docs", 10000)
+            "indexed": parsed_result.get("indexed", False),
+            "query_test": is_query,
+            "query_links": query_links
         },
         "results": {
-            "success": True
+            "insert_time_ms": parsed_result.get("time_ms") if is_insert else None,
+            "insert_throughput": parsed_result.get("throughput") if is_insert else None,
+            "query_time_ms": parsed_result.get("time_ms") if is_query else None,
+            "query_throughput": parsed_result.get("throughput") if is_query else None,
+            "success": True,
+            "error": None
         },
-        "source": "test.sh"  # Mark as coming from Docker test script
+        "system_info": metadata.get("system_info", {}),
+        "resource_metrics": {},
+        "ci_info": metadata.get("ci_info", {}),
+        "source": "test.sh"
     }
 
-    if is_insert:
-        doc["results"]["insert_time_ms"] = parsed_result.get("time_ms")
-        doc["results"]["insert_throughput"] = parsed_result.get("throughput")
-    else:
-        doc["results"]["query_time_ms"] = parsed_result.get("time_ms")
-        doc["results"]["query_throughput"] = parsed_result.get("throughput")
-        doc["test_config"]["query_links"] = parsed_result.get("link_elements", 0)
+    # Add Java version to system_info if available
+    java_version = metadata.get("java_version")
+    if java_version and doc.get("system_info"):
+        doc["system_info"]["java_version"] = java_version
 
     return doc
 
@@ -214,6 +317,16 @@ def main():
                        help='Number of documents in test')
     parser.add_argument('--input-file', '-f', default=None,
                        help='Read benchmark output from file instead of stdin')
+    parser.add_argument('--docker-image', default=None,
+                       help='Docker image name (e.g., "mongo", "postgres")')
+    parser.add_argument('--docker-image-tag', default=None,
+                       help='Docker image tag (e.g., "latest", "7.0.5")')
+    parser.add_argument('--container-name', default=None,
+                       help='Docker container name (for image ID lookup)')
+    parser.add_argument('--num-runs', type=int, default=1,
+                       help='Number of benchmark runs')
+    parser.add_argument('--batch-size', type=int, default=100,
+                       help='Batch size for bulk insertions')
     parser.add_argument('--dry-run', action='store_true',
                        help='Parse and show results without storing to MongoDB')
     parser.add_argument('--connection-string', default=None,
@@ -251,10 +364,20 @@ def main():
     if db_version == 'unknown':
         db_version = get_db_version_from_output(output, args.db_type)
 
+    # Collect metadata once (system_info, ci_info, client version, docker info)
+    print(f"Collecting system metadata...")
+    metadata = collect_metadata(args.db_type, args.docker_image, args.container_name)
+
+    # Override docker tag if explicitly provided via CLI
+    if args.docker_image_tag and metadata.get("docker"):
+        metadata["docker"]["tag"] = args.docker_image_tag
+
     # Build MongoDB documents
     documents = []
     for result in parsed_results:
-        doc = build_mongodb_document(result, args.db_type, test_run_id, db_version)
+        doc = build_mongodb_document(result, args.db_type, test_run_id, db_version,
+                                     metadata=metadata, num_runs=args.num_runs,
+                                     batch_size=args.batch_size)
         documents.append(doc)
 
         if args.dry_run:
