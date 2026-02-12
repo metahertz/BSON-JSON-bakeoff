@@ -23,22 +23,11 @@ import signal
 import configparser
 from pathlib import Path
 
-# Import server profiler for server-side flame graphs
-try:
-    from profile_server import ServerProfiler
-    SERVER_PROFILER_AVAILABLE = True
-except ImportError:
-    SERVER_PROFILER_AVAILABLE = False
-
 JAR_PATH = "target/insertTest-1.0-jar-with-dependencies.jar"
 NUM_DOCS = 10000
 NUM_RUNS = 3
 BATCH_SIZE = 500
 QUERY_LINKS = 10  # Number of array elements for query tests
-
-# Async-profiler configuration
-ASYNC_PROFILER_PATH = "/opt/async-profiler/lib/libasyncProfiler.so"
-FLAMEGRAPH_OUTPUT_DIR = "flamegraphs"
 
 # Test configurations matching the article
 SINGLE_ATTR_TESTS = [
@@ -94,21 +83,6 @@ def load_benchmark_config():
     config = configparser.ConfigParser()
     config.read(config_file)
     return config
-
-def check_async_profiler():
-    """Check if async-profiler is available."""
-    if os.path.exists(ASYNC_PROFILER_PATH):
-        return True
-    else:
-        print(f"⚠️  async-profiler not found at {ASYNC_PROFILER_PATH}")
-        print(f"   Run ./setup_async_profiler.sh to install it")
-        return False
-
-def get_flamegraph_filename(db_name, size, attrs, test_type="insert"):
-    """Generate a unique filename for the flame graph."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    db_clean = db_name.replace(" ", "_").replace("(", "").replace(")", "").lower()
-    return f"{FLAMEGRAPH_OUTPUT_DIR}/{db_clean}_{test_type}_{size}B_{attrs}attrs_{timestamp}.html"
 
 def start_monitoring(output_file="resource_metrics.json", interval=5):
     """Start resource monitoring in the background."""
@@ -352,48 +326,18 @@ def cleanup_database_files(db_type):
     print("✓ Cleaned")
     time.sleep(1)
 
-def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_links=None, measure_sizes=False, flame_graph=False, db_name="unknown", server_profile=False, db_type=None):
-    """Run a single benchmark test, optionally with query tests and flame graph profiling.
+def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_links=None, measure_sizes=False, db_name="unknown", validate=False):
+    """Run a single benchmark test, optionally with query tests."""
 
-    Args:
-        server_profile: If True, profile the database server process (not just client)
-        db_type: Database type for server profiling ('mongodb', 'oracle', 'postgresql')
-    """
-
-    # Start server-side profiling if requested
-    server_profiler = None
-    if server_profile and db_type and SERVER_PROFILER_AVAILABLE:
-        try:
-            server_profiler = ServerProfiler(db_type, output_dir="server_flamegraphs")
-            if not server_profiler.start_profiling(duration_hint=300):  # Hint: ~5 minutes
-                print(f"    ⚠️  Server profiling failed to start")
-                server_profiler = None
-            else:
-                print(f"    🔥 Server-side profiling started for {db_type}")
-        except Exception as e:
-            print(f"    ⚠️  Server profiling error: {e}")
-            server_profiler = None
-
-    # Prepare client-side flame graph if requested
-    flamegraph_file = None
-    if flame_graph and os.path.exists(ASYNC_PROFILER_PATH):
-        # Create flamegraph output directory if it doesn't exist
-        os.makedirs(FLAMEGRAPH_OUTPUT_DIR, exist_ok=True)
-
-        # Generate filename
-        test_type = "query" if query_links is not None else "insert"
-        flamegraph_file = get_flamegraph_filename(db_name, size, attrs, test_type)
-
-        # Build Java command with async-profiler agent
-        agent_opts = f"start,event=cpu,file={flamegraph_file}"
-        cmd = f"java -agentpath:{ASYNC_PROFILER_PATH}={agent_opts} -jar {JAR_PATH} {db_flags} -s {size} -n {attrs} -r {num_runs} -b {batch_size}"
-        print(f"    🔥 Client-side profiling enabled: {flamegraph_file}")
-    else:
-        cmd = f"java -jar {JAR_PATH} {db_flags} -s {size} -n {attrs} -r {num_runs} -b {batch_size}"
+    cmd = f"java -jar {JAR_PATH} {db_flags} -s {size} -n {attrs} -r {num_runs} -b {batch_size}"
 
     # Add size measurement flag if specified
     if measure_sizes:
         cmd += " -size"
+
+    # Add validation flag if specified
+    if validate:
+        cmd += " -v"
 
     # Add query test flag if specified
     if query_links is not None:
@@ -487,17 +431,8 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
     except Exception as e:
         print(f"    ERROR: {str(e)}")
         return {"success": False, "error": str(e)}
-    finally:
-        # Stop server-side profiling if it was started
-        if server_profiler is not None:
-            try:
-                svg_path = server_profiler.stop_profiling()
-                if svg_path:
-                    print(f"    ✓ Server flame graph: {svg_path}")
-            except Exception as e:
-                print(f"    ⚠️  Server profiling stop error: {e}")
 
-def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_test=False, measure_sizes=False, track_activity=False, activity_log=None, flame_graph=False, server_profile=False, config=None):
+def run_test_suite(test_configs, test_type, enable_queries=False, measure_sizes=False, track_activity=False, activity_log=None, config=None, validate=False):
     """Run a complete test suite (single or multi attribute).
 
     Args:
@@ -505,12 +440,10 @@ def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_te
         config: ConfigParser object with benchmark config (required for Oracle)
         test_type: Description of test type
         enable_queries: Whether to run query tests
-        restart_per_test: If True, restart database before EACH test for maximum isolation
         measure_sizes: Whether to enable BSON/OSON object size measurement
+        validate: If True, enable data integrity validation
         track_activity: If True, record database start/stop timestamps
         activity_log: List to append activity events to (format: {db_name, event, timestamp})
-        flame_graph: Whether to generate flame graphs with async-profiler (client-side)
-        server_profile: Whether to generate server-side flame graphs
     """
     print(f"\n{'='*80}")
     print(f"{test_type.upper()} ATTRIBUTE TESTS" + (" WITH QUERIES" if enable_queries else ""))
@@ -521,153 +454,96 @@ def run_test_suite(test_configs, test_type, enable_queries=False, restart_per_te
     if activity_log is None:
         activity_log = []
 
-    if restart_per_test:
-        # MAXIMUM ISOLATION MODE: Restart database before each individual test
-        # Initialize results dict
-        for db in DATABASES:
-            results[db['key']] = []
+    # Start database once, run all tests, then stop
+    current_service = None
+    current_db_name = None
 
-        # Outer loop: iterate through tests
-        for test_idx, test in enumerate(test_configs):
-            # Inner loop: run this test on each database
-            for db in DATABASES:
-                if test_idx == 0:
-                    # Print database header only for first test
-                    print(f"\n--- {db['name']} ---")
+    for db in DATABASES:
+        print(f"\n--- {db['name']} ---")
 
-                # Start database for this specific test
-                if not start_database(db['service'], db['db_type'], config):
-                    print(f"  Testing: {test['desc']}... ✗ Database failed to start")
-                    results[db['key']].append({"success": False, "error": "Database failed to start"})
-                    continue
-
-                # Run the test
-                print(f"  Testing: {test['desc']}...", end=" ", flush=True)
-
-                result = run_benchmark(
-                    db['flags'],
-                    test['size'],
-                    test['attrs'],
-                    NUM_DOCS,
-                    NUM_RUNS,
-                    BATCH_SIZE,
-                    query_links=QUERY_LINKS if enable_queries else None,
-                    measure_sizes=measure_sizes,
-                    flame_graph=flame_graph,
-                    db_name=db['name'],
-                    server_profile=server_profile,
-                    db_type=db['db_type']
-                )
-
-                if result['success']:
-                    output = f"✓ {result['time_ms']}ms ({result['throughput']:,.0f} docs/sec)"
-                    if enable_queries and 'query_time_ms' in result and result['query_time_ms']:
-                        output += f" | Query: {result['query_time_ms']}ms ({result['query_throughput']:,.0f} queries/sec)"
-                    results[db['key']].append(result)
-                    print(output)
-                else:
-                    results[db['key']].append(result)
-                    print(f"✗ {result.get('error', 'Failed')}")
-
-                # Stop database immediately after test completes
-                stop_database(db['service'])
-
-                # Clean up database files to free disk space
-                cleanup_database_files(db['db_type'])
-
-    else:
-        # ORIGINAL MODE: Start database once, run all tests, then stop
-        current_service = None
-        current_db_name = None
-
-        for db in DATABASES:
-            print(f"\n--- {db['name']} ---")
-
-            # Start database if different from current
-            if db['service'] != current_service:
-                # Stop previous database if any
-                if current_service:
-                    stop_database(current_service)
-                    # Clean up previous database files
-                    if current_db_name:
-                        prev_db_type = None
-                        for prev_db in DATABASES:
-                            if prev_db['name'] == current_db_name:
-                                prev_db_type = prev_db['db_type']
-                                break
-                        if prev_db_type:
-                            cleanup_database_files(prev_db_type)
-                    if track_activity and current_db_name:
-                        activity_log.append({
-                            "database": current_db_name,
-                            "event": "stopped",
-                            "timestamp": datetime.now().isoformat()
-                        })
-
-                # Start new database
-                if not start_database(db['service'], db['db_type'], config):
-                    print(f"  ERROR: Failed to start {db['service']}, skipping tests")
-                    results[db['key']] = [{"success": False, "error": "Database failed to start"} for _ in test_configs]
-                    continue
-
-                current_service = db['service']
-                current_db_name = db['name']
-
-                if track_activity:
+        # Start database if different from current
+        if db['service'] != current_service:
+            # Stop previous database if any
+            if current_service:
+                stop_database(current_service)
+                # Clean up previous database files
+                if current_db_name:
+                    prev_db_type = None
+                    for prev_db in DATABASES:
+                        if prev_db['name'] == current_db_name:
+                            prev_db_type = prev_db['db_type']
+                            break
+                    if prev_db_type:
+                        cleanup_database_files(prev_db_type)
+                if track_activity and current_db_name:
                     activity_log.append({
-                        "database": db['name'],
-                        "event": "started",
+                        "database": current_db_name,
+                        "event": "stopped",
                         "timestamp": datetime.now().isoformat()
                     })
 
-            results[db['key']] = []
+            # Start new database
+            if not start_database(db['service'], db['db_type'], config):
+                print(f"  ERROR: Failed to start {db['service']}, skipping tests")
+                results[db['key']] = [{"success": False, "error": "Database failed to start"} for _ in test_configs]
+                continue
 
-            for test in test_configs:
-                print(f"  Testing: {test['desc']}...", end=" ", flush=True)
+            current_service = db['service']
+            current_db_name = db['name']
 
-                result = run_benchmark(
-                    db['flags'],
-                    test['size'],
-                    test['attrs'],
-                    NUM_DOCS,
-                    NUM_RUNS,
-                    BATCH_SIZE,
-                    query_links=QUERY_LINKS if enable_queries else None,
-                    measure_sizes=measure_sizes,
-                    flame_graph=flame_graph,
-                    db_name=db['name'],
-                    server_profile=server_profile,
-                    db_type=db['db_type']
-                )
-
-                if result['success']:
-                    output = f"✓ {result['time_ms']}ms ({result['throughput']:,.0f} docs/sec)"
-                    if enable_queries and 'query_time_ms' in result and result['query_time_ms']:
-                        output += f" | Query: {result['query_time_ms']}ms ({result['query_throughput']:,.0f} queries/sec)"
-                    results[db['key']].append(result)
-                    print(output)
-                else:
-                    results[db['key']].append(result)
-                    print(f"✗ {result.get('error', 'Failed')}")
-
-        # Stop the last database
-        if current_service:
-            stop_database(current_service)
-            # Clean up final database files
-            if current_db_name:
-                final_db_type = None
-                for final_db in DATABASES:
-                    if final_db['name'] == current_db_name:
-                        final_db_type = final_db['db_type']
-                        break
-                if final_db_type:
-                    cleanup_database_files(final_db_type)
-            if track_activity and current_db_name:
+            if track_activity:
                 activity_log.append({
-                    "database": current_db_name,
-                    "event": "stopped",
+                    "database": db['name'],
+                    "event": "started",
                     "timestamp": datetime.now().isoformat()
                 })
+
+        results[db['key']] = []
+
+        for test in test_configs:
+            print(f"  Testing: {test['desc']}...", end=" ", flush=True)
+
+            result = run_benchmark(
+                db['flags'],
+                test['size'],
+                test['attrs'],
+                NUM_DOCS,
+                NUM_RUNS,
+                BATCH_SIZE,
+                query_links=QUERY_LINKS if enable_queries else None,
+                measure_sizes=measure_sizes,
+                db_name=db['name'],
+                validate=validate
+            )
+
+            if result['success']:
+                output = f"✓ {result['time_ms']}ms ({result['throughput']:,.0f} docs/sec)"
+                if enable_queries and 'query_time_ms' in result and result['query_time_ms']:
+                    output += f" | Query: {result['query_time_ms']}ms ({result['query_throughput']:,.0f} queries/sec)"
+                results[db['key']].append(result)
+                print(output)
+            else:
+                results[db['key']].append(result)
+                print(f"✗ {result.get('error', 'Failed')}")
+
+    # Stop the last database
+    if current_service:
+        stop_database(current_service)
+        # Clean up final database files
+        if current_db_name:
+            final_db_type = None
+            for final_db in DATABASES:
+                if final_db['name'] == current_db_name:
+                    final_db_type = final_db['db_type']
+                    break
+            if final_db_type:
+                cleanup_database_files(final_db_type)
+        if track_activity and current_db_name:
+            activity_log.append({
+                "database": current_db_name,
+                "event": "stopped",
+                "timestamp": datetime.now().isoformat()
+            })
 
     return results
 
@@ -769,9 +645,9 @@ def run_full_comparison_suite(args):
     for db in DATABASES:
         db['flags'] = db['flags'].replace(' -i', '').replace('-i ', '').replace(' -mv', '').replace('-mv ', '')
 
-    # Run tests without indexes - restart database before each test for maximum isolation
-    single_results_noindex = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (NO INDEX)", enable_queries=False, restart_per_test=True, measure_sizes=args.measure_sizes, flame_graph=args.flame_graph, server_profile=args.server_profile, config=config)
-    multi_results_noindex = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (NO INDEX)", enable_queries=False, restart_per_test=True, measure_sizes=args.measure_sizes, flame_graph=args.flame_graph, server_profile=args.server_profile, config=config)
+    # Run tests without indexes
+    single_results_noindex = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (NO INDEX)", enable_queries=False, measure_sizes=args.measure_sizes, config=config, validate=args.validate)
+    multi_results_noindex = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (NO INDEX)", enable_queries=False, measure_sizes=args.measure_sizes, config=config, validate=args.validate)
 
     # ========== PART 2: WITH-INDEX TESTS ==========
     print(f"\n{'='*80}")
@@ -805,9 +681,9 @@ def run_full_comparison_suite(args):
 
     print()
 
-    # Run tests with indexes and queries - restart database before each test for maximum isolation
-    single_results_indexed = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (WITH INDEX)", enable_queries=True, restart_per_test=True, measure_sizes=args.measure_sizes, flame_graph=args.flame_graph, server_profile=args.server_profile, config=config)
-    multi_results_indexed = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (WITH INDEX)", enable_queries=True, restart_per_test=True, measure_sizes=args.measure_sizes, flame_graph=args.flame_graph, server_profile=args.server_profile, config=config)
+    # Run tests with indexes and queries
+    single_results_indexed = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE ATTRIBUTE (WITH INDEX)", enable_queries=True, measure_sizes=args.measure_sizes, config=config, validate=args.validate)
+    multi_results_indexed = run_test_suite(MULTI_ATTR_TESTS, "MULTI ATTRIBUTE (WITH INDEX)", enable_queries=True, measure_sizes=args.measure_sizes, config=config, validate=args.validate)
 
     # Stop resource monitoring if running
     if monitor_proc is not None:
@@ -910,12 +786,10 @@ def main():
                         help='Resource monitoring interval in seconds (default: 5)')
     parser.add_argument('--nostats', action='store_true',
                         help='Disable Oracle statistics gathering (Oracle only)')
-    parser.add_argument('--flame-graph', action='store_true',
-                        help='Generate flame graphs for profiling (requires async-profiler)')
-    parser.add_argument('--server-profile', action='store_true',
-                        help='Generate server-side flame graphs using perf (requires FlameGraph tools and sudo)')
     parser.add_argument('--large-items', action='store_true',
                         help='Include large item tests (10KB, 100KB, 1000KB) in addition to standard tests')
+    parser.add_argument('--validate', action='store_true',
+                        help='Enable data integrity validation mode')
     args = parser.parse_args()
 
     # Load benchmark configuration
@@ -943,30 +817,6 @@ def main():
                (args.postgresql and db['db_type'] == 'postgresql'):
                 enabled_databases.append(db)
         DATABASES = enabled_databases
-
-    # Check for async-profiler if flame graph profiling is enabled
-    if args.flame_graph:
-        if not check_async_profiler():
-            print("\n❌ Flame graph profiling requested but async-profiler is not available.")
-            print("   Please install async-profiler by running: ./setup_async_profiler.sh")
-            print("   Continuing without flame graphs...\n")
-            args.flame_graph = False  # Disable flame graphs
-        else:
-            print(f"\n✓ Client-side flame graph profiling enabled - output directory: {FLAMEGRAPH_OUTPUT_DIR}/")
-
-    # Check for server profiling tools if server profiling is enabled
-    if args.server_profile:
-        if not SERVER_PROFILER_AVAILABLE:
-            print("\n❌ Server profiling requested but profile_server.py not found.")
-            print("   Continuing without server profiling...\n")
-            args.server_profile = False
-        elif not os.path.exists("FlameGraph"):
-            print("\n❌ Server profiling requested but FlameGraph tools not found.")
-            print("   Please clone FlameGraph: git clone https://github.com/brendangregg/FlameGraph")
-            print("   Continuing without server profiling...\n")
-            args.server_profile = False
-        else:
-            print(f"\n✓ Server-side profiling enabled - output directory: server_flamegraphs/")
 
     # Add -nostats flag to Oracle databases if requested
     if args.nostats:
@@ -1023,14 +873,12 @@ def main():
         # Run single-attribute tests
         single_results = run_test_suite(SINGLE_ATTR_TESTS, "SINGLE", enable_queries=enable_queries,
                                        measure_sizes=args.measure_sizes, track_activity=True,
-                                       activity_log=activity_log, flame_graph=args.flame_graph,
-                                       server_profile=args.server_profile, config=config)
+                                       activity_log=activity_log, config=config, validate=args.validate)
 
         # Run multi-attribute tests
         multi_results = run_test_suite(MULTI_ATTR_TESTS, "MULTI", enable_queries=enable_queries,
                                       measure_sizes=args.measure_sizes, track_activity=True,
-                                      activity_log=activity_log, flame_graph=args.flame_graph,
-                                      server_profile=args.server_profile, config=config)
+                                      activity_log=activity_log, config=config, validate=args.validate)
 
         # Generate summary
         generate_summary_table(single_results, multi_results)

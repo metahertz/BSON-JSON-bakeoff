@@ -1,23 +1,24 @@
 #!/bin/bash
 
-# Full benchmark automation script with progress monitoring
-# This script runs article benchmarks with query tests, monitors progress,
-# and updates summary markdown files
+# Full benchmark automation script with progress monitoring (Docker version)
+# This script runs article benchmarks with query tests using Docker containers
+# for MongoDB and DocumentDB, monitors progress, and updates summary markdown files
 
 set -e
 
-BENCHMARK_LOG="benchmark_run.log"
+BENCHMARK_LOG="benchmark_run_docker.log"
 RESULTS_FILE="article_benchmark_results.json"
 TIMEOUT_SECONDS=7200  # 120 minutes
 PROGRESS_INTERVAL=180  # 3 minutes
 
 echo "=========================================================================="
-echo "FULL BENCHMARK SUITE WITH QUERY TESTS"
+echo "FULL BENCHMARK SUITE WITH QUERY TESTS (DOCKER VERSION)"
 echo "=========================================================================="
 echo "Start time: $(date)"
 echo "Timeout: ${TIMEOUT_SECONDS}s (120 minutes)"
 echo "Progress updates: Every ${PROGRESS_INTERVAL}s (3 minutes)"
 echo "Per-test timeout: 900s (15 minutes)"
+echo "Databases: MongoDB and DocumentDB (Docker containers)"
 echo ""
 
 # Clean up old benchmark run log
@@ -27,7 +28,7 @@ rm -f "$BENCHMARK_LOG"
 echo "Starting benchmarks in background..."
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-timeout $TIMEOUT_SECONDS python3 "$SCRIPT_DIR/run_article_benchmarks.py" --queries  > "$BENCHMARK_LOG" 2>&1 &
+timeout $TIMEOUT_SECONDS python3 "$SCRIPT_DIR/run_article_benchmarks_docker.py" --queries --monitor > "$BENCHMARK_LOG" 2>&1 &
 BENCHMARK_PID=$!
 echo "Benchmark started with PID: $BENCHMARK_PID"
 echo "Log file: $BENCHMARK_LOG"
@@ -38,7 +39,7 @@ show_progress() {
     echo "=== Progress Update ($(date '+%H:%M:%S')) ==="
     if [ -f "$BENCHMARK_LOG" ]; then
         # Show last 40 lines with relevant info
-        tail -40 "$BENCHMARK_LOG" | grep -E "(Testing:|✓|✗|SUMMARY|---|MongoDB|PostgreSQL|Oracle|Start time|End time)" || echo "Benchmarks in progress..."
+        tail -40 "$BENCHMARK_LOG" | grep -E "(Testing:|✓|✗|SUMMARY|---|MongoDB|DocumentDB|Start time|End time)" || echo "Benchmarks in progress..."
     else
         echo "Waiting for benchmark to start..."
     fi
@@ -110,3 +111,4 @@ echo "  2. Update summary markdown files with findings"
 echo ""
 echo "Completion time: $(date)"
 echo "=========================================================================="
+

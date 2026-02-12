@@ -211,6 +211,33 @@ public class MongoDBOperations implements DatabaseOperations {
     }
 
     @Override
+    public long getDocumentCount(String collectionName) {
+        try {
+            return database.getCollection(collectionName).countDocuments();
+        } catch (Exception e) {
+            System.err.println("Error getting document count: " + e.getMessage());
+            return -1;
+        }
+    }
+
+    @Override
+    public boolean validateDocument(String collectionName, String id, JSONObject expected) {
+        try {
+            MongoCollection<Document> collection = database.getCollection(collectionName);
+            Document doc = collection.find(Filters.eq("_id", id)).first();
+            if (doc == null) {
+                return false;
+            }
+            // Validate key fields match
+            String docId = doc.getString("_id");
+            return docId != null && docId.equals(expected.getString("_id"));
+        } catch (Exception e) {
+            System.err.println("Error validating document: " + e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
     public void close() {
         client.close();
     }

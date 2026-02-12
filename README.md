@@ -53,10 +53,19 @@ BSON-JSON-bakeoff/
 │   ├── Oracle23AIOperations.java   # Oracle 23AI Duality Views implementation
 │   ├── OracleJCT.java               # Oracle JSON Collection Tables implementation
 │   └── OracleJCT2.java              # Alternative Oracle JCT implementation
+├── scripts/
+│   ├── run_article_benchmarks_docker.py  # Main benchmark orchestration script
+│   ├── results_storage.py          # MongoDB results storage module
+│   ├── version_detector.py         # Version detection for databases and libraries
+│   ├── system_info_collector.py   # System information collection
+│   └── monitor_resources.py        # Resource monitoring during tests
+├── webapp/                          # Visualization webapp (Node.js/Express)
+│   ├── server.js                    # Express server
+│   ├── routes/results.js            # API routes for querying results
+│   └── public/                     # Frontend (HTML, CSS, JS)
+├── config/
+│   └── benchmark_config.ini.example # Configuration template
 ├── pom.xml                          # Maven project configuration
-├── test.sh                          # Automated testing script with Docker
-├── run_article_benchmarks.py       # Python benchmark orchestration with per-test restart
-├── generate_html_report.py         # HTML report generation from benchmark results
 ├── CLAUDE.md                        # AI assistant guidance and project documentation
 ├── SAMPLE_DOCUMENTS.md             # Sample realistic document structures
 ├── README.md                        # This file (you are here)
@@ -100,7 +109,7 @@ Replace:
 
 **Note**: The `config.properties` file is excluded from git to keep your credentials secure. Never commit this file to version control.
 
-### 3. Build the Project
+### 4. Build the Project
 
 ```bash
 mvn clean package
@@ -454,7 +463,34 @@ The script automatically:
 2. Starts the appropriate database for each test
 3. Runs 3 iterations and keeps the best time
 4. Stops the database after each test completes
-5. Saves results to JSON for further analysis
+5. Stores results to MongoDB (if configured) and saves a local JSON backup
+
+## Results Storage and Visualization
+
+Benchmark results are automatically stored in MongoDB (if configured) with comprehensive metadata including:
+- Database versions and Docker image information
+- Client library versions
+- System information (CPU, memory, OS)
+- Resource metrics during test execution
+- CI environment metadata
+
+### Viewing Results
+
+Use the visualization webapp to view and analyze results:
+
+```bash
+cd webapp
+npm install
+cp .env.example .env
+# Edit .env with your MongoDB connection string
+npm start
+```
+
+Then open http://localhost:3000 in your browser to:
+- View interactive performance charts
+- Compare performance across database versions
+- Filter results by database type, version, date range
+- Export data as CSV for further analysis
 
 ## Performance Analysis and Benchmarking Methodology
 

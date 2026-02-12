@@ -400,6 +400,40 @@ public class Oracle23AIOperations implements DatabaseOperations {
     }
 
     @Override
+    public long getDocumentCount(String collectionName) {
+        try {
+            String sql = "SELECT COUNT(*) FROM " + collectionName + "_docs";
+            stmt = connection.prepareStatement(sql);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                return rs.getLong(1);
+            }
+            return -1;
+        } catch (SQLException e) {
+            System.err.println("Error getting document count: " + e.getMessage());
+            return -1;
+        }
+    }
+
+    @Override
+    public boolean validateDocument(String collectionName, String id, JSONObject expected) {
+        try {
+            String sql = "SELECT doc_id FROM " + collectionName + "_docs WHERE doc_id = ?";
+            stmt = connection.prepareStatement(sql);
+            stmt.setString(1, id);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                String docId = rs.getString("doc_id");
+                return docId != null && docId.equals(expected.getString("_id"));
+            }
+            return false;
+        } catch (SQLException e) {
+            System.err.println("Error validating document: " + e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
     public void close() {
         try {
             if (stmt != null && !stmt.isClosed()) {

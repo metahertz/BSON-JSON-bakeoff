@@ -24,3 +24,11 @@ port = 27017
 user = postgres
 host = localhost
 port = 5432
+
+[results_storage]
+# MongoDB connection string for storing benchmark results
+# For MongoDB Atlas (cloud): mongodb+srv://username:password@cluster.mongodb.net/database
+# For local MongoDB: mongodb://localhost:27017
+mongodb_connection_string = mongodb+srv://user:pass@cluster.mongodb.net/benchmark_db
+database_name = benchmark_results
+collection_name = test_runs

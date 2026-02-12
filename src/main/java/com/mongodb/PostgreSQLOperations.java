@@ -164,6 +164,43 @@ public class PostgreSQLOperations implements DatabaseOperations {
     }
 
     @Override
+    public long getDocumentCount(String collectionName) {
+        String sql = "SELECT COUNT(*) FROM " + collectionName;
+        try {
+            stmt = connection.prepareStatement(sql);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                return rs.getLong(1);
+            }
+            return -1;
+        } catch (SQLException e) {
+            System.err.println("Error getting document count: " + e.getMessage());
+            return -1;
+        }
+    }
+
+    @Override
+    public boolean validateDocument(String collectionName, String id, JSONObject expected) {
+        // PostgreSQL stores documents with auto-generated serial id, not _id from JSON
+        // So we validate by querying for the JSON _id field within the data column
+        String sql = "SELECT data FROM " + collectionName + " WHERE data->>'_id' = ?";
+        try {
+            stmt = connection.prepareStatement(sql);
+            stmt.setString(1, id);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                String jsonData = rs.getString("data");
+                JSONObject doc = new JSONObject(jsonData);
+                return doc.getString("_id").equals(expected.getString("_id"));
+            }
+            return false;
+        } catch (SQLException e) {
+            System.err.println("Error validating document: " + e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
     public void close() {
         try {
             if (connection != null && !connection.isClosed()) {

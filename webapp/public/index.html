@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Benchmark Results Dashboard</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Benchmark Results Dashboard</h1>
+            <p>Performance comparison across database versions and configurations</p>
+        </header>
+
+        <div class="filters">
+            <div class="filter-group">
+                <label for="database-type">Database Type:</label>
+                <select id="database-type">
+                    <option value="">All</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="database-version">Database Version:</label>
+                <select id="database-version">
+                    <option value="">All</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="test-type">Test Type:</label>
+                <select id="test-type">
+                    <option value="">All</option>
+                    <option value="single_attr">Single Attribute</option>
+                    <option value="multi_attr">Multi Attribute</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="date-range">Date Range:</label>
+                <input type="date" id="start-date">
+                <input type="date" id="end-date">
+            </div>
+            <button id="apply-filters" class="btn-primary">Apply Filters</button>
+            <button id="export-data" class="btn-secondary">Export CSV</button>
+        </div>
+
+        <div class="charts-container">
+            <div class="chart-section">
+                <h2>Insertion Performance (Lower is better)</h2>
+                <canvas id="insertion-chart"></canvas>
+            </div>
+            <div class="chart-section">
+                <h2>Query Performance (Lower is better)</h2>
+                <canvas id="query-chart"></canvas>
+            </div>
+            <div class="chart-section">
+                <h2>Throughput Comparison (Higher is better)</h2>
+                <canvas id="throughput-chart"></canvas>
+            </div>
+        </div>
+
+        <div class="results-table">
+            <h2>Recent Test Results</h2>
+            <table id="results-table">
+                <thead>
+                    <tr>
+                        <th>Timestamp</th>
+                        <th>Database</th>
+                        <th>Version</th>
+                        <th>Test Type</th>
+                        <th>Payload Size</th>
+                        <th>Insert Time (ms)</th>
+                        <th>Insert Throughput</th>
+                        <th>Query Time (ms)</th>
+                    </tr>
+                </thead>
+                <tbody id="results-tbody">
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>
