@@ -106,6 +106,7 @@ store_results() {
 run_benchmark() {
     local db_type="$1"
     local extra_flags="$2"
+    shift 2  # Remove db_type and extra_flags so "$@" only contains user args
     local output_file="$LOG_DIR/${db_type}_$(date +%Y%m%d_%H%M%S).log"
 
     log_info "Running $db_type benchmark..."
@@ -249,7 +250,7 @@ echo ""
 # ============================================
 log_info "Starting YugabyteDB container..."
 cleanup_container "db"
-docker run --name db -d -p 5433:5433 yugabytedb/yugabyte yugabyted start --background=false
+docker run --name db -d -p 5432:5433 yugabytedb/yugabyte yugabyted start --background=false
 
 if wait_for_db "db" "docker exec db yugabyted status" 60; then
     # Wait for YSQL to be ready and create test database
@@ -271,7 +272,7 @@ echo ""
 # ============================================
 log_info "Starting CockroachDB container..."
 cleanup_container "db"
-docker run --name db -d -p 26257:26257 cockroachdb/cockroach start-single-node --insecure
+docker run --name db -d -p 5432:26257 cockroachdb/cockroach start-single-node --insecure
 
 if wait_for_db "db" "docker exec db cockroach sql --insecure -e 'SELECT 1'" 30; then
     # Create test database and postgres user
