@@ -46,6 +46,26 @@ mkdir -p "$LOG_DIR"
     mvn clean package -q
 }
 
+# Map db_type to docker image name
+get_docker_image() {
+    case "$1" in
+        mongodb)       echo "mongo" ;;
+        documentdb)    echo "documentdb-local" ;;
+        postgresql)    echo "postgres" ;;
+        yugabytedb)    echo "yugabytedb/yugabyte" ;;
+        cockroachdb)   echo "cockroachdb/cockroach" ;;
+        *)             echo "unknown" ;;
+    esac
+}
+
+# Map db_type to docker container name
+get_container_name() {
+    case "$1" in
+        documentdb)    echo "documentdb" ;;
+        *)             echo "db" ;;
+    esac
+}
+
 # Function to store results in MongoDB
 store_results() {
     local db_type="$1"
@@ -60,11 +80,18 @@ store_results() {
         return 1
     fi
 
+    local docker_image
+    docker_image=$(get_docker_image "$db_type")
+    local container_name
+    container_name=$(get_container_name "$db_type")
+
     log_info "Storing $db_type results to MongoDB..."
     python3 "$SCRIPTS_DIR/store_benchmark_results.py" \
         --db-type "$db_type" \
         --test-run-id "$TEST_RUN_ID" \
-        --input-file "$output_file"
+        --input-file "$output_file" \
+        --docker-image "$docker_image" \
+        --container-name "$container_name"
 
     local exit_code=$?
     if [ $exit_code -eq 0 ]; then
@@ -79,6 +106,7 @@ store_results() {
 run_benchmark() {
     local db_type="$1"
     local extra_flags="$2"
+    shift 2  # Remove db_type and extra_flags so "$@" only contains user args
     local output_file="$LOG_DIR/${db_type}_$(date +%Y%m%d_%H%M%S).log"
 
     log_info "Running $db_type benchmark..."
@@ -222,7 +250,7 @@ echo ""
 # ============================================
 log_info "Starting YugabyteDB container..."
 cleanup_container "db"
-docker run --name db -d -p 5433:5433 yugabytedb/yugabyte yugabyted start --background=false
+docker run --name db -d -p 5432:5433 yugabytedb/yugabyte yugabyted start --background=false
 
 if wait_for_db "db" "docker exec db yugabyted status" 60; then
     # Wait for YSQL to be ready and create test database
@@ -244,7 +272,7 @@ echo ""
 # ============================================
 log_info "Starting CockroachDB container..."
 cleanup_container "db"
-docker run --name db -d -p 26257:26257 cockroachdb/cockroach start-single-node --insecure
+docker run --name db -d -p 5432:26257 cockroachdb/cockroach start-single-node --insecure
 
 if wait_for_db "db" "docker exec db cockroach sql --insecure -e 'SELECT 1'" 30; then
     # Create test database and postgres user
