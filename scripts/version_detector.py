@@ -85,19 +85,19 @@ def get_docker_image_version(image_name: str, container_name: Optional[str] = No
 def get_database_version(db_type: str, connection_info: Dict[str, Any]) -> Optional[str]:
     """
     Query database for its version.
-    
+
     Args:
-        db_type: Database type ("mongodb", "documentdb", "postgresql", "oracle")
+        db_type: Database type ("mongodb", "documentdb", "postgresql", "yugabytedb", "cockroachdb", "oracle")
         connection_info: Connection information (host, port, etc.)
-        
+
     Returns:
         Database version string or None if failed
     """
     try:
         if db_type in ["mongodb", "documentdb"]:
             return _get_mongodb_version(connection_info)
-        elif db_type == "postgresql":
-            return _get_postgresql_version(connection_info)
+        elif db_type in ["postgresql", "yugabytedb", "cockroachdb"]:
+            return _get_postgresql_version(connection_info, db_type)
         elif db_type == "oracle":
             return _get_oracle_version(connection_info)
         else:
@@ -116,19 +116,25 @@ def _get_mongodb_version(connection_info: Dict[str, Any]) -> Optional[str]:
         user = connection_info.get('user')
         password = connection_info.get('password')
         database = connection_info.get('database', 'admin')
-        
+        use_tls = connection_info.get('tls', False)
+
         # Try using pymongo first (more reliable, works without mongosh)
         try:
             from pymongo import MongoClient
             import urllib.parse
-            
+
             # Build connection URI
             if user and password:
                 encoded_password = urllib.parse.quote(password, safe='')
                 connection_uri = f"mongodb://{user}:{encoded_password}@{host}:{port}/{database}"
             else:
                 connection_uri = f"mongodb://{host}:{port}/{database}"
-            
+
+            # Add TLS parameters for DocumentDB
+            if use_tls:
+                sep = '&' if '?' in connection_uri else '?'
+                connection_uri += f"{sep}directConnection=true&tls=true&tlsAllowInvalidCertificates=true"
+
             # Connect and get version
             client = MongoClient(connection_uri, serverSelectionTimeoutMS=5000)
             # Try buildInfo first (standard MongoDB command)
@@ -196,42 +202,84 @@ def _get_mongodb_version(connection_info: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _get_postgresql_version(connection_info: Dict[str, Any]) -> Optional[str]:
-    """Get PostgreSQL version."""
+def _get_postgresql_version(connection_info: Dict[str, Any], db_type: str = "postgresql") -> Optional[str]:
+    """Get PostgreSQL/YugabyteDB/CockroachDB version."""
     try:
         host = connection_info.get('host', 'localhost')
         port = connection_info.get('port', 5432)
         user = connection_info.get('user', 'postgres')
         password = connection_info.get('password', '')
-        
-        # Try psql command
+        container = connection_info.get('container')
+
+        version_text = None
+
+        # Try psql from host first
         env = os.environ.copy()
         if password:
             env['PGPASSWORD'] = password
-        
+
         cmd = f"psql -h {host} -p {port} -U {user} -t -c 'SELECT version();'"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10, env=env)
-        if result.returncode == 0:
-            version = result.stdout.strip()
-            # Extract version number (e.g., "PostgreSQL 17.1")
-            match = re.search(r'PostgreSQL\s+([\d.]+)', version)
-            if match:
-                return match.group(1)
-            return version
-        
-        # Fallback: docker exec
-        container = connection_info.get('container')
-        if container:
-            cmd = f"docker exec {container} psql -U {user} -t -c 'SELECT version();'"
+        if result.returncode == 0 and result.stdout.strip():
+            version_text = result.stdout.strip()
+
+        # Fallback: docker exec with db-specific commands
+        if not version_text and container:
+            if db_type == "cockroachdb":
+                cmd = f"docker exec {container} cockroach sql --insecure -e 'SELECT version();'"
+            elif db_type == "yugabytedb":
+                # YugabyteDB binds YSQL to the container hostname, not localhost
+                hostname_result = subprocess.run(
+                    f"docker exec {container} hostname",
+                    shell=True, capture_output=True, text=True, timeout=5
+                )
+                yb_host = hostname_result.stdout.strip() if hostname_result.returncode == 0 else "localhost"
+                cmd = f"docker exec {container} ysqlsh -h {yb_host} -U {user} -t -c 'SELECT version();'"
+            else:
+                cmd = f"docker exec {container} psql -U {user} -t -c 'SELECT version();'"
+
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-            if result.returncode == 0:
-                version = result.stdout.strip()
-                match = re.search(r'PostgreSQL\s+([\d.]+)', version)
-                if match:
-                    return match.group(1)
-                return version
+            if result.returncode == 0 and result.stdout.strip():
+                version_text = result.stdout.strip()
+
+        # Parse version string based on db_type
+        if version_text:
+            return _parse_pg_version_string(version_text, db_type)
+
     except Exception as e:
-        logger.warning(f"Failed to get PostgreSQL version: {e}")
+        logger.warning(f"Failed to get {db_type} version: {e}")
+    return None
+
+
+def _parse_pg_version_string(version_text: str, db_type: str) -> Optional[str]:
+    """Parse version string from SELECT version() for PostgreSQL-compatible databases."""
+    if db_type == "cockroachdb":
+        # CockroachDB: "CockroachDB CCL v23.1.0 (go1.19.6, ...)"
+        match = re.search(r'CockroachDB\s+\w+\s+v?([\d.]+)', version_text)
+        if match:
+            return match.group(1)
+    elif db_type == "yugabytedb":
+        # YugabyteDB: "PostgreSQL 11.2-YB-2.20.1.0-b0 on ..."
+        match = re.search(r'YB-([\d.]+)', version_text)
+        if match:
+            return match.group(1)
+        # Fallback: extract PostgreSQL version
+        match = re.search(r'PostgreSQL\s+([\d.]+)', version_text)
+        if match:
+            return match.group(1)
+
+    # Default PostgreSQL: "PostgreSQL 17.1 on ..."
+    match = re.search(r'PostgreSQL\s+([\d.]+)', version_text)
+    if match:
+        return match.group(1)
+
+    # Return raw text (stripped) if no pattern matched
+    # Filter out table framing from cockroach sql output
+    for line in version_text.split('\n'):
+        line = line.strip()
+        if line and not line.startswith('-') and not line.startswith('(') and line.lower() != 'version':
+            return line
+
     return None
 
 
@@ -395,6 +443,8 @@ def get_all_versions(db_type: str, image_name: str, container_name: Optional[str
         "mongodb": "mongodb-driver-sync",
         "documentdb": "mongodb-driver-sync",
         "postgresql": "postgresql",
+        "yugabytedb": "postgresql",
+        "cockroachdb": "postgresql",
         "oracle": "ojdbc11"
     }
     client_lib = client_lib_map.get(db_type)
