@@ -209,10 +209,15 @@ def get_cloud_database_version(db_info):
 
 def load_benchmark_config():
     """Load benchmark configuration from config/benchmark_config.ini"""
-    # Find config file relative to project root (parent of scripts directory)
-    script_dir = Path(__file__).parent
-    project_root = script_dir.parent
-    config_file = project_root / "config" / "benchmark_config.ini"
+    # Allow override via environment variable (used by webapp benchmark runner)
+    env_path = os.environ.get("BENCHMARK_CONFIG_PATH")
+    if env_path:
+        config_file = Path(env_path)
+    else:
+        # Find config file relative to project root (parent of scripts directory)
+        script_dir = Path(__file__).parent
+        project_root = script_dir.parent
+        config_file = project_root / "config" / "benchmark_config.ini"
 
     if not config_file.exists():
         print(f"❌ ERROR: Benchmark config not found: {config_file}")
