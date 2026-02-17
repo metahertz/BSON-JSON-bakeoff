@@ -926,13 +926,36 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
             print(f"    ERROR: JAR file not found: {JAR_PATH}")
             return {"success": False, "error": f"JAR file not found: {JAR_PATH}"}
         
-        result = subprocess.run(
+        # Use Popen to stream output in real-time (for webapp Live Output)
+        # while also capturing it for regex parsing
+        proc = subprocess.Popen(
             cmd,
             shell=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            timeout=900  # 15 minutes per test
         )
+
+        stdout_lines = []
+        try:
+            for line in proc.stdout:
+                line_stripped = line.rstrip('\n')
+                stdout_lines.append(line_stripped)
+                print(f"    [benchmark] {line_stripped}", flush=True)
+            proc.wait(timeout=900)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            print(f"    ERROR: Java benchmark timed out after 900s", flush=True)
+            return {"success": False, "error": "Java benchmark timed out"}
+
+        # Build a result-like object for compatibility with parsing code below
+        class _Result:
+            pass
+        result = _Result()
+        result.stdout = '\n'.join(stdout_lines)
+        result.stderr = ''  # merged into stdout via STDOUT redirect
+        result.returncode = proc.returncode
 
         # Parse result for "Best time to insert" or "Time taken to insert"
         # Standard format: "Best time to insert 10000 documents with 100B payload in 1 attribute into indexed: 123ms"

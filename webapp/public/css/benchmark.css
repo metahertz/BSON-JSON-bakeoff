@@ -174,7 +174,8 @@
     font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
     font-size: 0.85em;
     line-height: 1.5;
-    max-height: 500px;
+    max-height: calc(100vh - 400px);
+    min-height: 300px;
     overflow-y: auto;
     white-space: pre-wrap;
     word-wrap: break-word;

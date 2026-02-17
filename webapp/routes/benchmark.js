@@ -120,11 +120,19 @@ function buildCliArgs(body) {
     return args;
 }
 
+/**
+ * Send an SSE event to all connected clients for a given run.
+ * Per the SSE spec, newlines inside the data field terminate the event,
+ * so multi-line payloads must be split into separate "data:" lines
+ * within a single event block.
+ */
 function broadcast(runId, event, data) {
     const clients = sseClients.get(runId);
-    if (!clients) return;
+    if (!clients || clients.size === 0) return;
+    const lines = String(data).split('\n');
+    const frame = `event: ${event}\n` + lines.map(l => `data: ${l}`).join('\n') + '\n\n';
     for (const res of clients) {
-        res.write(`event: ${event}\ndata: ${data}\n\n`);
+        res.write(frame);
     }
 }
 
@@ -141,7 +149,8 @@ router.post('/run', (req, res) => {
     const cliArgs = buildCliArgs(body);
 
     // Prepare environment — propagate current env, optionally override config path
-    const env = { ...process.env };
+    // Force unbuffered Python output so lines stream in real-time to SSE clients
+    const env = { ...process.env, PYTHONUNBUFFERED: '1' };
     const tmpConfig = buildTempConfig(body);
     if (tmpConfig) {
         env.BENCHMARK_CONFIG_PATH = tmpConfig;
@@ -160,12 +169,17 @@ router.post('/run', (req, res) => {
         startedAt: new Date().toISOString(),
         process: proc,
         tmpConfig,
+        outputBuffer: [],   // stores all output chunks for replay on reconnect
     };
 
     sseClients.set(runId, new Set());
 
     const onData = (chunk) => {
-        broadcast(runId, 'output', chunk.toString().replace(/\n$/, ''));
+        const text = chunk.toString().replace(/\n$/, '');
+        if (currentRun && currentRun.runId === runId) {
+            currentRun.outputBuffer.push(text);
+        }
+        broadcast(runId, 'output', text);
     };
 
     proc.stdout.on('data', onData);
@@ -216,6 +230,15 @@ router.get('/stream/:id', (req, res) => {
         sseClients.set(runId, clients);
     }
     clients.add(res);
+
+    // Replay buffered output so reconnecting clients see full history
+    if (currentRun && currentRun.runId === runId && currentRun.outputBuffer) {
+        for (const chunk of currentRun.outputBuffer) {
+            const lines = String(chunk).split('\n');
+            const frame = `event: output\n` + lines.map(l => `data: ${l}`).join('\n') + '\n\n';
+            res.write(frame);
+        }
+    }
 
     // If already finished, send status immediately
     if (currentRun && currentRun.runId === runId && currentRun.status !== 'running') {
