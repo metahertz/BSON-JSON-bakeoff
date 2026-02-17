@@ -1037,13 +1037,29 @@ function updateLatencyTimelineChart(cloudResults) {
         return;
     }
 
-    // Find the max number of samples across all db types (insert + RTT)
-    const allSampleLengths = [
-        ...Object.values(byDb).map(s => s.length),
-        ...Object.values(rttByDb).map(s => s.length)
-    ];
-    const maxSamples = Math.max(...allSampleLengths);
-    const labels = Array.from({ length: maxSamples }, (_, i) => `Sample ${i + 1}`);
+    // Convert samples to {x: relativeSeconds, y: ms} so all series align in the
+    // time domain.  Samples can be either plain numbers (legacy, no timestamps)
+    // or {ts, ms} objects (current).  Find the global earliest timestamp across
+    // all series to compute relative offsets.
+    const allSeries = [...Object.values(byDb), ...Object.values(rttByDb)];
+    let t0 = Infinity;
+    for (const series of allSeries) {
+        for (const s of series) {
+            if (typeof s === 'object' && s.ts != null && s.ts < t0) t0 = s.ts;
+        }
+    }
+    const hasTimestamps = t0 !== Infinity;
+
+    function toXY(series, fallbackStartIdx) {
+        return series.map((s, i) => {
+            if (hasTimestamps && typeof s === 'object' && s.ts != null) {
+                return { x: (s.ts - t0) / 1000, y: s.ms };
+            }
+            // Legacy plain-number samples — fall back to index
+            const val = typeof s === 'object' ? s.ms : s;
+            return { x: fallbackStartIdx + i, y: val };
+        });
+    }
 
     const datasets = [];
 
@@ -1052,7 +1068,7 @@ function updateLatencyTimelineChart(cloudResults) {
         const color = getColorForDatabaseType(dbType);
         datasets.push({
             label: `${dbType} (insert)`,
-            data: samples,
+            data: toXY(samples, 0),
             borderColor: color,
             backgroundColor: color + '20',
             borderWidth: 1.5,
@@ -1066,7 +1082,7 @@ function updateLatencyTimelineChart(cloudResults) {
     Object.entries(rttByDb).forEach(([dbType, samples]) => {
         datasets.push({
             label: `${dbType} (network RTT)`,
-            data: samples,
+            data: toXY(samples, 0),
             borderColor: '#95a5a6',
             backgroundColor: '#95a5a610',
             borderWidth: 1.5,
@@ -1079,7 +1095,7 @@ function updateLatencyTimelineChart(cloudResults) {
 
     latencyTimelineChart = new Chart(ctx, {
         type: 'line',
-        data: { labels, datasets },
+        data: { datasets },
         options: {
             responsive: true,
             maintainAspectRatio: true,
@@ -1089,7 +1105,8 @@ function updateLatencyTimelineChart(cloudResults) {
                     title: { display: true, text: 'Latency (ms)' }
                 },
                 x: {
-                    title: { display: true, text: 'Sample Number' },
+                    type: 'linear',
+                    title: { display: true, text: hasTimestamps ? 'Time (seconds)' : 'Sample Number' },
                     ticks: {
                         maxTicksLimit: 20
                     }
