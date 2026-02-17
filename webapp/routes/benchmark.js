@@ -123,8 +123,14 @@ function buildCliArgs(body) {
 function broadcast(runId, event, data) {
     const clients = sseClients.get(runId);
     if (!clients) return;
+    // SSE protocol: newlines inside a data field terminate the field, so raw
+    // multiline chunks would lose every line after the first.  Split into
+    // individual lines and send each as a separate SSE message.
+    const lines = data.split('\n');
     for (const res of clients) {
-        res.write(`event: ${event}\ndata: ${data}\n\n`);
+        for (const line of lines) {
+            res.write(`event: ${event}\ndata: ${line}\n\n`);
+        }
     }
 }
 
@@ -142,6 +148,9 @@ router.post('/run', (req, res) => {
 
     // Prepare environment — propagate current env, optionally override config path
     const env = { ...process.env };
+    // Force Python to use unbuffered stdout/stderr so output streams line-by-line
+    // instead of being block-buffered (~8KB) when piped to a subprocess.
+    env.PYTHONUNBUFFERED = '1';
     const tmpConfig = buildTempConfig(body);
     if (tmpConfig) {
         env.BENCHMARK_CONFIG_PATH = tmpConfig;
@@ -165,6 +174,8 @@ router.post('/run', (req, res) => {
     sseClients.set(runId, new Set());
 
     const onData = (chunk) => {
+        // Strip trailing newline to avoid an extra blank line per chunk;
+        // broadcast() handles splitting on any embedded newlines.
         broadcast(runId, 'output', chunk.toString().replace(/\n$/, ''));
     };
 
