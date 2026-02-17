@@ -31,45 +31,62 @@ function projectRoot() {
 }
 
 /**
- * Build a temporary benchmark_config.ini that includes cloud connection strings
- * supplied by the user, while keeping results_storage credentials server-side only.
- * Returns the path to the temp file, or null if no overrides needed.
+ * Build a temporary benchmark_config.ini that ensures cloud databases are enabled
+ * when selected in the webapp.  If the user supplies a connection string it takes
+ * precedence; otherwise the value from the base config file is kept (but `enabled`
+ * is forced to `true`).  Returns the path to the temp file, or null if no cloud
+ * databases were selected.
  */
 function buildTempConfig(body) {
-    const needsAtlasOverride = body.atlas_connection_string &&
-        body.cloud_databases && body.cloud_databases.includes('mongodb-atlas');
-    const needsAzureOverride = body.azure_connection_string &&
-        body.cloud_databases && body.cloud_databases.includes('azure-documentdb');
+    const cloudDbs = body.cloud_databases || [];
+    const wantsAtlas = cloudDbs.includes('mongodb-atlas');
+    const wantsAzure = cloudDbs.includes('azure-documentdb');
 
-    if (!needsAtlasOverride && !needsAzureOverride) {
+    if (!wantsAtlas && !wantsAzure) {
         return null;
     }
 
     // Read existing config to preserve results_storage and other sections
     const baseConfigPath = path.join(projectRoot(), 'config', 'benchmark_config.ini');
-    let baseContent = '';
+    let content = '';
     if (fs.existsSync(baseConfigPath)) {
-        baseContent = fs.readFileSync(baseConfigPath, 'utf8');
+        content = fs.readFileSync(baseConfigPath, 'utf8');
     }
 
-    // Simple INI manipulation: replace or append cloud sections
-    let content = baseContent;
-
-    if (needsAtlasOverride) {
-        const section = `[mongodb_atlas]\nenabled = true\nconnection_string = ${body.atlas_connection_string}\n`;
-        if (content.includes('[mongodb_atlas]')) {
-            content = content.replace(/\[mongodb_atlas\][^\[]*/, section);
+    // Helper: replace or append an INI section
+    function upsertSection(sectionName, kvPairs) {
+        const header = `[${sectionName}]`;
+        const lines = kvPairs.map(([k, v]) => `${k} = ${v}`).join('\n');
+        const block = `${header}\n${lines}\n`;
+        if (content.includes(header)) {
+            content = content.replace(new RegExp(`\\[${sectionName}\\][^\\[]*`), block);
         } else {
-            content += '\n' + section;
+            content += '\n' + block;
         }
     }
 
-    if (needsAzureOverride) {
-        const section = `[azure_documentdb]\nenabled = true\nconnection_string = ${body.azure_connection_string}\n`;
-        if (content.includes('[azure_documentdb]')) {
-            content = content.replace(/\[azure_documentdb\][^\[]*/, section);
-        } else {
-            content += '\n' + section;
+    // Extract an existing value from the raw INI text (simple key = value match)
+    function existingValue(sectionName, key) {
+        const sectionRe = new RegExp(`\\[${sectionName}\\]([^\\[]*)`);
+        const m = content.match(sectionRe);
+        if (!m) return null;
+        const lineRe = new RegExp(`^\\s*${key}\\s*=\\s*(.+)`, 'm');
+        const lm = m[1].match(lineRe);
+        return lm ? lm[1].trim() : null;
+    }
+
+    if (wantsAtlas) {
+        const connStr = body.atlas_connection_string || existingValue('mongodb_atlas', 'connection_string');
+        if (connStr) {
+            upsertSection('mongodb_atlas', [['enabled', 'true'], ['connection_string', connStr]]);
+        }
+        // If no connection string at all, the Python script will warn about it
+    }
+
+    if (wantsAzure) {
+        const connStr = body.azure_connection_string || existingValue('azure_documentdb', 'connection_string');
+        if (connStr) {
+            upsertSection('azure_documentdb', [['enabled', 'true'], ['connection_string', connStr]]);
         }
     }
 
