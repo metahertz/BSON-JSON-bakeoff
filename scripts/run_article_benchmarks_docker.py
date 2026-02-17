@@ -1799,6 +1799,21 @@ def main():
                    args.yugabytedb or args.cockroachdb or
                    args.mongodb_atlas or args.azure_documentdb)
 
+    # Build a set of enabled cloud db_types for quick lookup
+    enabled_cloud_types = {db['db_type'] for db in cloud_dbs}
+
+    # Warn if a cloud DB was requested via CLI but isn't enabled in config
+    if args.mongodb_atlas and 'mongodb-cloud' not in enabled_cloud_types:
+        print("⚠️  WARNING: --mongodb-atlas was requested but MongoDB Atlas is not enabled in config.")
+        print("   Set enabled = true under [mongodb_atlas] in config/benchmark_config.ini")
+        print("   (or provide a connection string via the webapp).")
+        print()
+    if args.azure_documentdb and 'documentdb-azure' not in enabled_cloud_types:
+        print("⚠️  WARNING: --azure-documentdb was requested but Azure DocumentDB is not enabled in config.")
+        print("   Set enabled = true under [azure_documentdb] in config/benchmark_config.ini")
+        print("   (or provide a connection string via the webapp).")
+        print()
+
     for cloud_db in cloud_dbs:
         # Include cloud DB if its specific flag is passed, or if no DB flags are passed at all
         if not any_db_flag:
