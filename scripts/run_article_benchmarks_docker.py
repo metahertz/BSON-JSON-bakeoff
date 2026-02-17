@@ -1037,8 +1037,8 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
                         op_type = parts[1]
                         try:
                             stats = json.loads(parts[2])
-                            # Simplify samples to just ms values for storage (drop timestamps for size)
-                            simplified_samples = [s['ms'] for s in stats.get('samples', [])]
+                            # Preserve timestamps so the webapp can align series in the time domain
+                            simplified_samples = [{'ts': s['ts'], 'ms': s['ms']} for s in stats.get('samples', [])]
                             latency_metrics[op_type] = {
                                 'min_ms': stats.get('min_ms'),
                                 'max_ms': stats.get('max_ms'),
