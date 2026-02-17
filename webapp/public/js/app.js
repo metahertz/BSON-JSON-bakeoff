@@ -1015,6 +1015,7 @@ function updateLatencyTimelineChart(cloudResults) {
 
     // Pick the most recent result per cloud db type that has samples
     const byDb = {};
+    const queryByDb = {};
     const rttByDb = {};
     cloudResults.forEach(r => {
         const dbType = r.database?.type || 'unknown';
@@ -1023,6 +1024,12 @@ function updateLatencyTimelineChart(cloudResults) {
             // Keep most recent (results are sorted by timestamp desc)
             if (!byDb[dbType]) {
                 byDb[dbType] = insertMetrics.samples;
+            }
+        }
+        const queryMetrics = r.latency_metrics?.query;
+        if (queryMetrics?.samples?.length > 0) {
+            if (!queryByDb[dbType]) {
+                queryByDb[dbType] = queryMetrics.samples;
             }
         }
         const rttMetrics = r.latency_metrics?.baseline_rtt;
@@ -1041,11 +1048,15 @@ function updateLatencyTimelineChart(cloudResults) {
     // time domain.  Samples can be either plain numbers (legacy, no timestamps)
     // or {ts, ms} objects (current).  Find the global earliest timestamp across
     // all series to compute relative offsets.
-    const allSeries = [...Object.values(byDb), ...Object.values(rttByDb)];
+    const allSeries = [...Object.values(byDb), ...Object.values(queryByDb), ...Object.values(rttByDb)];
     let t0 = Infinity;
     for (const series of allSeries) {
         for (const s of series) {
-            if (typeof s === 'object' && s.ts != null && s.ts < t0) t0 = s.ts;
+            if (typeof s === 'object' && s.ts != null) {
+                // Consider start time (ts - ms) as well as end time (ts)
+                const startTs = s.ms != null ? s.ts - s.ms : s.ts;
+                if (startTs < t0) t0 = startTs;
+            }
         }
     }
     const hasTimestamps = t0 !== Infinity;
@@ -1061,24 +1072,79 @@ function updateLatencyTimelineChart(cloudResults) {
         });
     }
 
+    // Transform {ts, ms} samples into null-separated rectangle segments.
+    // Each sample becomes a filled rectangle: start_x to end_x at height ms.
+    function toRectXY(series, fallbackStartIdx) {
+        const points = [];
+        series.forEach((s, i) => {
+            if (hasTimestamps && typeof s === 'object' && s.ts != null && s.ms != null) {
+                const endX = (s.ts - t0) / 1000;
+                const startX = endX - s.ms / 1000;
+                points.push({ x: startX, y: s.ms });
+                points.push({ x: endX, y: s.ms });
+                // Null gap to separate rectangles
+                points.push({ x: endX + 0.0001, y: null });
+            } else {
+                // Legacy fallback — just plot as points
+                const val = typeof s === 'object' ? s.ms : s;
+                points.push({ x: fallbackStartIdx + i, y: val });
+            }
+        });
+        return points;
+    }
+
     const datasets = [];
 
-    // Insert latency datasets
+    // Insert latency datasets — rectangles showing batch duration
     Object.entries(byDb).forEach(([dbType, samples]) => {
         const color = getColorForDatabaseType(dbType);
+        if (hasTimestamps) {
+            datasets.push({
+                label: `${dbType} (insert batch)`,
+                data: toRectXY(samples, 0),
+                borderColor: color,
+                backgroundColor: color + '40',
+                borderWidth: 1,
+                pointRadius: 0,
+                fill: 'origin',
+                spanGaps: false,
+                tension: 0,
+                order: 2  // drawn first (behind)
+            });
+        } else {
+            // Legacy: simple line+fill
+            datasets.push({
+                label: `${dbType} (insert)`,
+                data: toXY(samples, 0),
+                borderColor: color,
+                backgroundColor: color + '20',
+                borderWidth: 1.5,
+                pointRadius: 0,
+                fill: true,
+                tension: 0.1,
+                order: 2
+            });
+        }
+    });
+
+    // Query latency datasets — thin dashed line
+    Object.entries(queryByDb).forEach(([dbType, samples]) => {
+        const color = getColorForDatabaseType(dbType);
         datasets.push({
-            label: `${dbType} (insert)`,
+            label: `${dbType} (query)`,
             data: toXY(samples, 0),
             borderColor: color,
-            backgroundColor: color + '20',
-            borderWidth: 1.5,
+            backgroundColor: 'transparent',
+            borderWidth: 1,
+            borderDash: [3, 3],
             pointRadius: 0,
-            fill: true,
-            tension: 0.1
+            fill: false,
+            tension: 0.1,
+            order: 1
         });
     });
 
-    // Baseline RTT datasets (gray dashed line)
+    // Baseline RTT datasets (gray dashed line, drawn on top)
     Object.entries(rttByDb).forEach(([dbType, samples]) => {
         datasets.push({
             label: `${dbType} (network RTT)`,
@@ -1089,7 +1155,8 @@ function updateLatencyTimelineChart(cloudResults) {
             borderDash: [5, 5],
             pointRadius: 0,
             fill: false,
-            tension: 0.1
+            tension: 0.1,
+            order: 0  // drawn last (on top)
         });
     });
 
@@ -1099,6 +1166,11 @@ function updateLatencyTimelineChart(cloudResults) {
         options: {
             responsive: true,
             maintainAspectRatio: true,
+            interaction: {
+                mode: 'nearest',
+                axis: 'x',
+                intersect: false
+            },
             scales: {
                 y: {
                     beginAtZero: true,
@@ -1115,7 +1187,26 @@ function updateLatencyTimelineChart(cloudResults) {
             plugins: {
                 tooltip: {
                     callbacks: {
-                        label: (context) => `${context.dataset.label}: ${context.parsed.y?.toFixed(2)}ms`
+                        label: (context) => {
+                            const ds = context.dataset;
+                            const y = context.parsed.y;
+                            if (y == null) return null;
+
+                            // For insert batch rectangles, show start/end/duration
+                            if (ds.spanGaps === false && ds.label?.includes('insert batch')) {
+                                const data = ds.data;
+                                const idx = context.dataIndex;
+                                // Each rectangle is 3 points: start, end, null-gap
+                                const rectStart = idx - (idx % 3);
+                                const startPt = data[rectStart];
+                                const endPt = data[rectStart + 1];
+                                if (startPt && endPt && startPt.y != null) {
+                                    return `${ds.label}: ${startPt.y.toFixed(2)}ms (${startPt.x.toFixed(1)}s – ${endPt.x.toFixed(1)}s)`;
+                                }
+                            }
+
+                            return `${ds.label}: ${y.toFixed(2)}ms`;
+                        }
                     }
                 }
             }
