@@ -912,7 +912,7 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
 
     # Add latency collection flag for cloud/SaaS databases
     if collect_latency:
-        cmd += " -latency"
+        cmd += " -latency -baseline-rtt"
 
     # Add query test flag if specified
     if query_links is not None:
