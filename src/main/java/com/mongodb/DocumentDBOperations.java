@@ -316,6 +316,16 @@ public class DocumentDBOperations implements DatabaseOperations {
         }
     }
 
+    /**
+     * Run a ping command against the admin database and return the round-trip time in nanoseconds.
+     * Used for baseline RTT measurement on cloud/SaaS databases.
+     */
+    public long pingRTT() {
+        long start = System.nanoTime();
+        database.runCommand(new Document("ping", 1));
+        return System.nanoTime() - start;
+    }
+
     @Override
     public void close() {
         client.close();

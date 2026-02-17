@@ -321,6 +321,33 @@ function showDetailModal(result) {
         ['Samples', rm?.samples],
     ]);
 
+    // Latency / Network Baseline (RTT)
+    const lm = result.latency_metrics;
+    const rttPre = lm?.baseline_rtt_pre;
+    const rttContinuous = lm?.baseline_rtt;
+    const latencySection = document.getElementById('detail-latency-section');
+    if (rttPre || rttContinuous) {
+        latencySection.style.display = '';
+        const latencyItems = [];
+        if (rttPre) {
+            latencyItems.push(
+                ['Pre-test p50', fmtMetric(rttPre.p50_ms) != null ? fmtMetric(rttPre.p50_ms) + ' ms' : null],
+                ['Pre-test p99', fmtMetric(rttPre.p99_ms) != null ? fmtMetric(rttPre.p99_ms) + ' ms' : null],
+                ['Pre-test Samples', rttPre.sample_count]
+            );
+        }
+        if (rttContinuous) {
+            latencyItems.push(
+                ['During-test p50', fmtMetric(rttContinuous.p50_ms) != null ? fmtMetric(rttContinuous.p50_ms) + ' ms' : null],
+                ['During-test p99', fmtMetric(rttContinuous.p99_ms) != null ? fmtMetric(rttContinuous.p99_ms) + ' ms' : null],
+                ['During-test Samples', rttContinuous.sample_count]
+            );
+        }
+        populateDetailGrid('detail-latency-metrics', latencyItems);
+    } else {
+        latencySection.style.display = 'none';
+    }
+
     // CI Information
     const ci = result.ci_info;
     populateDetailGrid('detail-ci-info', [
@@ -905,24 +932,32 @@ function updateLatencyPercentileChart(cloudResults) {
         latencyPercentileChart.destroy();
     }
 
-    // Group by database type
+    // Group by database type — collect insert metrics and baseline RTT metrics
     const byDb = {};
+    const rttByDb = {};
     cloudResults.forEach(r => {
         const dbType = r.database?.type || 'unknown';
         if (!byDb[dbType]) byDb[dbType] = [];
+        if (!rttByDb[dbType]) rttByDb[dbType] = [];
         const insertMetrics = r.latency_metrics?.insert_multi_attr || r.latency_metrics?.insert_single_attr;
         if (insertMetrics) {
             byDb[dbType].push(insertMetrics);
         }
+        const rttMetrics = r.latency_metrics?.baseline_rtt;
+        if (rttMetrics) {
+            rttByDb[dbType].push(rttMetrics);
+        }
     });
 
     const labels = ['Min', 'p50', 'p95', 'p99', 'Max'];
-    const datasets = Object.entries(byDb).map(([dbType, metricsList]) => {
-        // Average across all test results for this db type
+    const datasets = [];
+
+    // Insert latency datasets
+    Object.entries(byDb).forEach(([dbType, metricsList]) => {
         const avg = (arr, key) => arr.reduce((s, m) => s + (m[key] || 0), 0) / arr.length;
         const color = getColorForDatabaseType(dbType);
-        return {
-            label: dbType,
+        datasets.push({
+            label: `${dbType} (insert)`,
             data: [
                 avg(metricsList, 'min_ms'),
                 avg(metricsList, 'p50_ms'),
@@ -933,7 +968,27 @@ function updateLatencyPercentileChart(cloudResults) {
             backgroundColor: color + '80',
             borderColor: color,
             borderWidth: 2
-        };
+        });
+    });
+
+    // Baseline RTT datasets (gray, dashed border)
+    Object.entries(rttByDb).forEach(([dbType, metricsList]) => {
+        if (metricsList.length === 0) return;
+        const avg = (arr, key) => arr.reduce((s, m) => s + (m[key] || 0), 0) / arr.length;
+        datasets.push({
+            label: `${dbType} (network RTT)`,
+            data: [
+                avg(metricsList, 'min_ms'),
+                avg(metricsList, 'p50_ms'),
+                avg(metricsList, 'p95_ms'),
+                avg(metricsList, 'p99_ms'),
+                avg(metricsList, 'max_ms')
+            ],
+            backgroundColor: '#95a5a640',
+            borderColor: '#95a5a6',
+            borderWidth: 2,
+            borderDash: [5, 5]
+        });
     });
 
     latencyPercentileChart = new Chart(ctx, {
@@ -960,6 +1015,7 @@ function updateLatencyTimelineChart(cloudResults) {
 
     // Pick the most recent result per cloud db type that has samples
     const byDb = {};
+    const rttByDb = {};
     cloudResults.forEach(r => {
         const dbType = r.database?.type || 'unknown';
         const insertMetrics = r.latency_metrics?.insert_multi_attr || r.latency_metrics?.insert_single_attr;
@@ -969,20 +1025,33 @@ function updateLatencyTimelineChart(cloudResults) {
                 byDb[dbType] = insertMetrics.samples;
             }
         }
+        const rttMetrics = r.latency_metrics?.baseline_rtt;
+        if (rttMetrics?.samples?.length > 0) {
+            if (!rttByDb[dbType]) {
+                rttByDb[dbType] = rttMetrics.samples;
+            }
+        }
     });
 
-    if (Object.keys(byDb).length === 0) {
+    if (Object.keys(byDb).length === 0 && Object.keys(rttByDb).length === 0) {
         return;
     }
 
-    // Find the max number of samples across all db types
-    const maxSamples = Math.max(...Object.values(byDb).map(s => s.length));
-    const labels = Array.from({ length: maxSamples }, (_, i) => `Batch ${i + 1}`);
+    // Find the max number of samples across all db types (insert + RTT)
+    const allSampleLengths = [
+        ...Object.values(byDb).map(s => s.length),
+        ...Object.values(rttByDb).map(s => s.length)
+    ];
+    const maxSamples = Math.max(...allSampleLengths);
+    const labels = Array.from({ length: maxSamples }, (_, i) => `Sample ${i + 1}`);
 
-    const datasets = Object.entries(byDb).map(([dbType, samples]) => {
+    const datasets = [];
+
+    // Insert latency datasets
+    Object.entries(byDb).forEach(([dbType, samples]) => {
         const color = getColorForDatabaseType(dbType);
-        return {
-            label: dbType,
+        datasets.push({
+            label: `${dbType} (insert)`,
             data: samples,
             borderColor: color,
             backgroundColor: color + '20',
@@ -990,7 +1059,22 @@ function updateLatencyTimelineChart(cloudResults) {
             pointRadius: 0,
             fill: true,
             tension: 0.1
-        };
+        });
+    });
+
+    // Baseline RTT datasets (gray dashed line)
+    Object.entries(rttByDb).forEach(([dbType, samples]) => {
+        datasets.push({
+            label: `${dbType} (network RTT)`,
+            data: samples,
+            borderColor: '#95a5a6',
+            backgroundColor: '#95a5a610',
+            borderWidth: 1.5,
+            borderDash: [5, 5],
+            pointRadius: 0,
+            fill: false,
+            tension: 0.1
+        });
     });
 
     latencyTimelineChart = new Chart(ctx, {
@@ -1002,10 +1086,10 @@ function updateLatencyTimelineChart(cloudResults) {
             scales: {
                 y: {
                     beginAtZero: true,
-                    title: { display: true, text: 'Batch Latency (ms)' }
+                    title: { display: true, text: 'Latency (ms)' }
                 },
                 x: {
-                    title: { display: true, text: 'Batch Number' },
+                    title: { display: true, text: 'Sample Number' },
                     ticks: {
                         maxTicksLimit: 20
                     }

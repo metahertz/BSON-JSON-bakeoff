@@ -37,8 +37,12 @@ public class Main {
     public static boolean gatherOracleStats = true;  // Default: enabled
     public static boolean validateResults = false;  // Validation mode for data integrity checks
     public static boolean collectLatency = false;  // Collect per-operation latency metrics (for cloud/SaaS DBs)
+    public static boolean collectBaselineRtt = false;  // Collect baseline network RTT via ping command
     public static LatencyCollector insertLatencyCollector = null;
     public static LatencyCollector queryLatencyCollector = null;
+    private static LatencyCollector baselineRttPreCollector = null;
+    private static LatencyCollector baselineRttCollector = null;
+    private static volatile boolean baselineRttRunning = false;
 
     // Variables to track BSON object sizes
     private static long totalBsonSize = 0;
@@ -138,6 +142,11 @@ public class Main {
                     collectLatency = true;
                     break;
 
+                case "-baseline-rtt":
+                    System.out.println("Baseline RTT collection enabled - will measure network round-trip latency via ping...");
+                    collectBaselineRtt = true;
+                    break;
+
                 case "-r":
                     flag = arg;
                     break;
@@ -233,6 +242,58 @@ public class Main {
 
         initializeDatabase(dbType, connectionString);
 
+        // Auto-enable baseline RTT when latency collection is enabled and using MongoDB-compatible operations
+        if (collectLatency && !collectBaselineRtt &&
+            (dbOperations instanceof MongoDBOperations || dbOperations instanceof DocumentDBOperations)) {
+            collectBaselineRtt = true;
+            System.out.println("Baseline RTT collection auto-enabled for cloud database...");
+        }
+
+        // Run pre-test baseline RTT burst and start background monitoring
+        Thread baselineRttThread = null;
+        if (collectBaselineRtt && (dbOperations instanceof MongoDBOperations || dbOperations instanceof DocumentDBOperations)) {
+            // Pre-test burst: 20 pings to establish baseline
+            baselineRttPreCollector = new LatencyCollector("baseline_rtt_pre");
+            System.out.println("Running pre-test baseline RTT burst (20 pings)...");
+            for (int i = 0; i < 20; i++) {
+                long rttNanos;
+                if (dbOperations instanceof MongoDBOperations) {
+                    rttNanos = ((MongoDBOperations) dbOperations).pingRTT();
+                } else {
+                    rttNanos = ((DocumentDBOperations) dbOperations).pingRTT();
+                }
+                baselineRttPreCollector.recordNanos(rttNanos);
+            }
+            System.out.println(String.format("Pre-test baseline RTT: p50=%.1fms p99=%.1fms (n=%d)",
+                baselineRttPreCollector.getP50(), baselineRttPreCollector.getP99(), baselineRttPreCollector.getSampleCount()));
+
+            // Start background ping thread
+            baselineRttCollector = new LatencyCollector("baseline_rtt");
+            baselineRttRunning = true;
+            baselineRttThread = new Thread(() -> {
+                while (baselineRttRunning) {
+                    try {
+                        long rttNanos;
+                        if (dbOperations instanceof MongoDBOperations) {
+                            rttNanos = ((MongoDBOperations) dbOperations).pingRTT();
+                        } else {
+                            rttNanos = ((DocumentDBOperations) dbOperations).pingRTT();
+                        }
+                        baselineRttCollector.recordNanos(rttNanos);
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    } catch (Exception e) {
+                        // Connection may be closing, stop gracefully
+                        break;
+                    }
+                }
+            }, "baseline-rtt-monitor");
+            baselineRttThread.setDaemon(true);
+            baselineRttThread.start();
+        }
+
         for (Integer size : sizes){
 
             if (Main.runLookupTest) {
@@ -246,6 +307,26 @@ public class Main {
                 }
             }
             handleDataInsertions(size);
+        }
+
+        // Stop background RTT monitoring and print stats
+        if (baselineRttRunning) {
+            baselineRttRunning = false;
+            if (baselineRttThread != null) {
+                try {
+                    baselineRttThread.join(3000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
+        if (baselineRttPreCollector != null) {
+            baselineRttPreCollector.printStats();
+        }
+        if (baselineRttCollector != null && baselineRttCollector.getSampleCount() > 0) {
+            System.out.println(String.format("Background baseline RTT: p50=%.1fms p99=%.1fms (n=%d)",
+                baselineRttCollector.getP50(), baselineRttCollector.getP99(), baselineRttCollector.getSampleCount()));
+            baselineRttCollector.printStats();
         }
 
         System.out.println();
