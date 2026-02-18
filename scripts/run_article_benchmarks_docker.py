@@ -1146,8 +1146,24 @@ def run_benchmark(db_flags, size, attrs, num_docs, num_runs, batch_size, query_l
 
         return response
 
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         print(f"    ERROR: Timeout after 900 seconds")
+        print(f"    Command: {cmd}")
+        # e.stdout/e.stderr contain partial output captured before timeout
+        if e.stdout:
+            partial = e.stdout if isinstance(e.stdout, str) else e.stdout.decode('utf-8', errors='replace')
+            lines = partial.strip().split('\n')
+            print(f"    Partial stdout ({len(lines)} lines, last 15):")
+            for line in lines[-15:]:
+                print(f"      {line}")
+        else:
+            print(f"    No stdout captured before timeout")
+        if e.stderr:
+            partial_err = e.stderr if isinstance(e.stderr, str) else e.stderr.decode('utf-8', errors='replace')
+            err_lines = partial_err.strip().split('\n')
+            print(f"    Partial stderr ({len(err_lines)} lines, last 10):")
+            for line in err_lines[-10:]:
+                print(f"      {line}")
         return {"success": False, "error": "Timeout"}
     except Exception as e:
         print(f"    ERROR: {str(e)}")
