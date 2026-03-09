@@ -490,7 +490,7 @@ def start_docker_container(db_info):
             print("✓", end="", flush=True)
 
         # Start Salvobase container (no auth, MongoDB wire protocol on 27017)
-        cmd = f"docker run --name {container_name} --rm -d -p {port}:27017 -e MONGOCLONE_NOAUTH=true {image}"
+        cmd = f"docker run --name {container_name} --rm -d -p {port}:27017 -e MONGOCLONE_AUTH_NOAUTH=true {image}"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         if result.returncode != 0:
             return False, None
