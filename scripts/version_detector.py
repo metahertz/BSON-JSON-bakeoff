@@ -94,7 +94,7 @@ def get_database_version(db_type: str, connection_info: Dict[str, Any]) -> Optio
         Database version string or None if failed
     """
     try:
-        if db_type in ["mongodb", "documentdb", "mongodb-cloud", "documentdb-azure"]:
+        if db_type in ["mongodb", "documentdb", "mongodb-cloud", "documentdb-azure", "salvobase"]:
             return _get_mongodb_version(connection_info)
         elif db_type == "postgresql":
             return _get_postgresql_version(connection_info)

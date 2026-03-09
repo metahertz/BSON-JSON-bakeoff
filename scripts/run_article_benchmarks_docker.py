@@ -120,6 +120,7 @@ DATABASES = [
     {"name": "PostgreSQL (JSONB)", "key": "postgresql", "flags": "-p -j -i -rd", "container": "postgres-benchmark", "db_type": "postgresql", "port": 5432, "image": "postgres:latest"},
     {"name": "YugabyteDB (YSQL)", "key": "yugabytedb", "flags": "-p -i -rd", "container": "yugabyte-benchmark", "db_type": "yugabytedb", "port": 5433, "image": "yugabytedb/yugabyte:latest"},
     {"name": "CockroachDB (SQL)", "key": "cockroachdb", "flags": "-p -i -rd", "container": "cockroach-benchmark", "db_type": "cockroachdb", "port": 26257, "image": "cockroachdb/cockroach:latest"},
+    {"name": "Salvobase", "key": "salvobase", "flags": "-i -rd", "container": "salvobase-benchmark", "db_type": "salvobase", "port": 27018, "image": "salvobase"},
 ]
 
 # Cloud/SaaS databases - no Docker containers, connection string from config
@@ -466,6 +467,34 @@ def start_docker_container(db_info):
         if result.returncode != 0:
             return False, None
 
+    elif db_type == "salvobase":
+        # Ensure Salvobase image is available — build from source if missing
+        check_image = subprocess.run(f"docker images -q {image}", shell=True, capture_output=True, text=True)
+        if not check_image.stdout.strip():
+            print(f"    Building Salvobase image from source...", end=" ", flush=True)
+            build_dir = "/tmp/salvobase-build"
+            clone_result = subprocess.run(
+                f"rm -rf {build_dir} && git clone --depth 1 https://github.com/inder/salvobase.git {build_dir}",
+                shell=True, capture_output=True, text=True, timeout=120
+            )
+            if clone_result.returncode != 0:
+                print("✗ Failed to clone Salvobase repo")
+                return False, None
+            build_result = subprocess.run(
+                f"docker build -t salvobase:latest {build_dir}",
+                shell=True, capture_output=True, text=True, timeout=300
+            )
+            if build_result.returncode != 0:
+                print("✗ Failed to build Salvobase image")
+                return False, None
+            print("✓", end="", flush=True)
+
+        # Start Salvobase container (no auth, MongoDB wire protocol on 27017)
+        cmd = f"docker run --name {container_name} --rm -d -p {port}:27017 -e MONGOCLONE_NOAUTH=true {image}"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            return False, None
+
     # Get Docker image version info
     version_info = {}
     if RESULTS_STORAGE_AVAILABLE:
@@ -577,6 +606,18 @@ def check_ready(container_name, db_type):
         try:
             check = subprocess.run(
                 f"docker exec {container_name} cockroach sql --insecure -e 'SELECT 1'",
+                shell=True, capture_output=True, text=True, timeout=5
+            )
+            if check.returncode == 0:
+                return True
+        except subprocess.TimeoutExpired:
+            pass
+
+    elif db_type == "salvobase":
+        # Salvobase readiness check via built-in HTTP health endpoint
+        try:
+            check = subprocess.run(
+                f"docker exec {container_name} wget -qO- http://localhost:27080/health",
                 shell=True, capture_output=True, text=True, timeout=5
             )
             if check.returncode == 0:
@@ -875,6 +916,8 @@ def get_connection_string_for_db(db_info):
         return f"mongodb://localhost:{port}"
     elif db_type == "documentdb":
         return f"mongodb://testuser:testpass@localhost:{port}/?directConnection=true&tls=true&tlsAllowInvalidCertificates=true&serverSelectionTimeoutMS=60000&connectTimeoutMS=30000&socketTimeoutMS=60000"
+    elif db_type == "salvobase":
+        return f"mongodb://localhost:{port}"
     elif db_type in ("postgresql", "yugabytedb", "cockroachdb"):
         return f"jdbc:postgresql://localhost:{port}/test?user=postgres&password=password"
     return None
@@ -887,6 +930,8 @@ def get_docker_connection_string(db_type, port):
     and ports regardless of what's in the config file.
     """
     if db_type == "mongodb":
+        return f"mongodb://localhost:{port}"
+    elif db_type == "salvobase":
         return f"mongodb://localhost:{port}"
     elif db_type == "documentdb":
         return f"mongodb://testuser:testpass@localhost:{port}/?directConnection=true&tls=true&tlsAllowInvalidCertificates=true&serverSelectionTimeoutMS=60000&connectTimeoutMS=30000&socketTimeoutMS=60000"
@@ -1767,6 +1812,7 @@ def main():
     parser.add_argument('--postgresql', action='store_true', help='Run PostgreSQL tests')
     parser.add_argument('--yugabytedb', action='store_true', help='Run YugabyteDB tests')
     parser.add_argument('--cockroachdb', action='store_true', help='Run CockroachDB tests')
+    parser.add_argument('--salvobase', action='store_true', help='Run Salvobase tests')
     parser.add_argument('--mongodb-atlas', action='store_true',
                         help='Run MongoDB Atlas (cloud/SaaS) tests (requires [mongodb_atlas] enabled=true in config)')
     parser.add_argument('--azure-documentdb', action='store_true',
@@ -1812,7 +1858,7 @@ def main():
     # Add cloud databases if enabled in config AND requested via CLI (or no specific DB flags)
     cloud_dbs = get_enabled_cloud_databases(config)
     any_db_flag = (args.mongodb or args.documentdb or args.postgresql or
-                   args.yugabytedb or args.cockroachdb or
+                   args.yugabytedb or args.cockroachdb or args.salvobase or
                    args.mongodb_atlas or args.azure_documentdb)
 
     # Build a set of enabled cloud db_types for quick lookup
@@ -1847,6 +1893,7 @@ def main():
                (args.postgresql and db['db_type'] == 'postgresql') or \
                (args.yugabytedb and db['db_type'] == 'yugabytedb') or \
                (args.cockroachdb and db['db_type'] == 'cockroachdb') or \
+               (args.salvobase and db['db_type'] == 'salvobase') or \
                (args.mongodb_atlas and db['db_type'] == 'mongodb-cloud') or \
                (args.azure_documentdb and db['db_type'] == 'documentdb-azure'):
                 enabled_databases.append(db)

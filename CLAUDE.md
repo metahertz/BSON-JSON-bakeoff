@@ -28,6 +28,7 @@ A Java-based benchmarking tool that compares document storage and retrieval perf
 | PostgreSQL (JSON/JSONB) | `postgres:latest` | postgresql 42.7.3 | `-p` |
 | YugabyteDB (YSQL) | `yugabytedb/yugabyte:latest` | postgresql 42.7.3 | `-p` |
 | CockroachDB (SQL) | `cockroachdb/cockroach:latest` | postgresql 42.7.3 | `-p` |
+| Salvobase | `salvobase` (built from source) | mongodb-driver-sync 5.5.1 | (default) |
 
 ### Cloud/SaaS (Optional, config-gated)
 

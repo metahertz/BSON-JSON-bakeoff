@@ -102,6 +102,7 @@ get_docker_image() {
         postgresql)    echo "postgres" ;;
         yugabytedb)    echo "yugabytedb/yugabyte" ;;
         cockroachdb)   echo "cockroachdb/cockroach" ;;
+        salvobase)     echo "salvobase" ;;
         mongodb-cloud)       echo "cloud" ;;
         documentdb-azure)    echo "cloud" ;;
         *)             echo "unknown" ;;
@@ -219,6 +220,7 @@ get_connection_string() {
         postgresql)    echo "jdbc:postgresql://localhost:5432/test?user=postgres&password=password" ;;
         yugabytedb)    echo "jdbc:postgresql://localhost:5432/test?user=postgres&password=password" ;;
         cockroachdb)   echo "jdbc:postgresql://localhost:5432/test?user=postgres&password=password" ;;
+        salvobase)     echo "mongodb://localhost:27018" ;;
         *)             echo "" ;;
     esac
 }
@@ -466,6 +468,45 @@ else
     overall_success=false
 fi
 cleanup_container "db"
+
+echo ""
+
+# ============================================
+# Salvobase (MongoDB wire protocol compatible)
+# ============================================
+log_info "Starting Salvobase container..."
+cleanup_container "db"
+
+# Build Salvobase image from source if not available
+if ! docker images -q salvobase | grep -q .; then
+    log_info "Building Salvobase image from source..."
+    build_dir="/tmp/salvobase-build"
+    rm -rf "$build_dir"
+    if git clone --depth 1 https://github.com/inder/salvobase.git "$build_dir" 2>/dev/null; then
+        if docker build -t salvobase:latest "$build_dir" >/dev/null 2>&1; then
+            log_success "Salvobase image built"
+        else
+            log_error "Failed to build Salvobase image"
+            overall_success=false
+        fi
+        rm -rf "$build_dir"
+    else
+        log_error "Failed to clone Salvobase repo"
+        overall_success=false
+    fi
+fi
+
+if docker images -q salvobase | grep -q .; then
+    docker run --name db --rm -d -p 27018:27017 -e MONGOCLONE_NOAUTH=true salvobase
+
+    if wait_for_db "db" "docker exec db wget -qO- http://localhost:27080/health" 30; then
+        run_benchmark "salvobase" "" "$@" || overall_success=false
+    else
+        log_error "Salvobase failed to start"
+        overall_success=false
+    fi
+    cleanup_container "db"
+fi
 
 echo ""
 
