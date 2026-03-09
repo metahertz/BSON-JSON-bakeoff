@@ -512,6 +512,7 @@ function getColorForDatabaseType(dbType) {
         'postgresql': '#f093fb',
         'yugabytedb': '#43a047',
         'cockroachdb': '#ff9800',
+        'salvobase': '#00bcd4',
         'oracle': '#4facfe',
         'oracle23ai': '#00d2ff',
         'mongodb-cloud': '#2ecc71',
