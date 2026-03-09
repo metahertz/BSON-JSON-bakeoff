@@ -497,7 +497,7 @@ if ! docker images -q salvobase | grep -q .; then
 fi
 
 if docker images -q salvobase | grep -q .; then
-    docker run --name db --rm -d -p 27018:27017 -e MONGOCLONE_AUTH_NOAUTH=true salvobase
+    docker run --name db --rm -d -p 27018:27017 salvobase --datadir /var/lib/mongoclone --port 27017 --httpPort 27080 --bind_ip 0.0.0.0 --noauth
 
     if wait_for_db "db" "docker exec db wget -qO- http://localhost:27080/health" 30; then
         run_benchmark "salvobase" "" "$@" || overall_success=false
